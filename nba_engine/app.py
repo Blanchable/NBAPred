@@ -46,14 +46,32 @@ class NBAPredictor(tk.Tk):
         self.style = ttk.Style()
         self.style.theme_use('clam')
         
-        # Configure colors
-        self.configure(bg='#1a1a2e')
-        self.style.configure('TFrame', background='#1a1a2e')
-        self.style.configure('TLabel', background='#1a1a2e', foreground='#eee')
+        # Configure colors - using lighter theme for better readability
+        self.configure(bg='#2d2d44')
+        self.style.configure('TFrame', background='#2d2d44')
+        self.style.configure('TLabel', background='#2d2d44', foreground='#ffffff')
         self.style.configure('TButton', padding=10, font=('Segoe UI', 11))
         self.style.configure('Header.TLabel', font=('Segoe UI', 24, 'bold'), foreground='#ff6b35')
-        self.style.configure('SubHeader.TLabel', font=('Segoe UI', 14), foreground='#aaa')
-        self.style.configure('Status.TLabel', font=('Segoe UI', 10), foreground='#888')
+        self.style.configure('SubHeader.TLabel', font=('Segoe UI', 14), foreground='#cccccc')
+        self.style.configure('Status.TLabel', font=('Segoe UI', 10), foreground='#aaaaaa')
+        
+        # Configure Treeview for better readability
+        self.style.configure('Treeview',
+            background='#ffffff',
+            foreground='#000000',
+            fieldbackground='#ffffff',
+            font=('Segoe UI', 10),
+            rowheight=28
+        )
+        self.style.configure('Treeview.Heading',
+            background='#4a4a6a',
+            foreground='#ffffff',
+            font=('Segoe UI', 10, 'bold')
+        )
+        self.style.map('Treeview',
+            background=[('selected', '#0078d4')],
+            foreground=[('selected', '#ffffff')]
+        )
         
         # Create main container
         self.main_frame = ttk.Frame(self, padding=20)
@@ -133,9 +151,9 @@ class NBAPredictor(tk.Tk):
             self.log_frame,
             wrap=tk.WORD,
             font=('Consolas', 10),
-            bg='#0f0f1a',
-            fg='#0f0',
-            insertbackground='#0f0'
+            bg='#1e1e2e',
+            fg='#50fa7b',
+            insertbackground='#50fa7b'
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -185,10 +203,11 @@ class NBAPredictor(tk.Tk):
         self.pred_tree.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.pred_tree.yview)
         
-        # Style alternating rows
-        self.pred_tree.tag_configure('oddrow', background='#252540')
-        self.pred_tree.tag_configure('evenrow', background='#1a1a2e')
-        self.pred_tree.tag_configure('favorite', background='#1a3a1a')
+        # Style alternating rows - light colors for readability
+        self.pred_tree.tag_configure('oddrow', background='#f0f0f5', foreground='#000000')
+        self.pred_tree.tag_configure('evenrow', background='#ffffff', foreground='#000000')
+        self.pred_tree.tag_configure('home_favorite', background='#d4edda', foreground='#155724')
+        self.pred_tree.tag_configure('away_favorite', background='#fff3cd', foreground='#856404')
         
     def create_injuries_tree(self):
         """Create the injuries treeview widget."""
@@ -223,11 +242,11 @@ class NBAPredictor(tk.Tk):
         self.inj_tree.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.inj_tree.yview)
         
-        # Style by status
-        self.inj_tree.tag_configure('Out', background='#3a1a1a', foreground='#ff6b6b')
-        self.inj_tree.tag_configure('Doubtful', background='#3a2a1a', foreground='#ffa94d')
-        self.inj_tree.tag_configure('Questionable', background='#3a3a1a', foreground='#ffd43b')
-        self.inj_tree.tag_configure('Probable', background='#1a3a1a', foreground='#69db7c')
+        # Style by status - clear colors for readability
+        self.inj_tree.tag_configure('Out', background='#f8d7da', foreground='#721c24')
+        self.inj_tree.tag_configure('Doubtful', background='#ffe5d0', foreground='#8a4500')
+        self.inj_tree.tag_configure('Questionable', background='#fff3cd', foreground='#856404')
+        self.inj_tree.tag_configure('Probable', background='#d4edda', foreground='#155724')
         
     def log(self, message: str):
         """Add a message to the log."""
@@ -334,9 +353,13 @@ class NBAPredictor(tk.Tk):
             away_prob = f"{pred.away_win_prob:.1%}"
             time_str = pred.start_time_utc[:16] if pred.start_time_utc else "TBD"
             
-            tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-            if pred.home_win_prob > 0.65 or pred.away_win_prob > 0.65:
-                tag = 'favorite'
+            # Determine row color based on favorite
+            if pred.home_win_prob > 0.60:
+                tag = 'home_favorite'  # Green - home team favored
+            elif pred.away_win_prob > 0.60:
+                tag = 'away_favorite'  # Yellow - away team favored
+            else:
+                tag = 'evenrow' if i % 2 == 0 else 'oddrow'
             
             self.pred_tree.insert(
                 '', 'end',
