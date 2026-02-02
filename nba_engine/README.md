@@ -2,6 +2,8 @@
 
 A fully automated pregame NBA prediction engine that runs locally and generates predictions for today's games using team net ratings and home court advantage.
 
+> **Built with Claude Opus 4.5** - This project was developed with assistance from Anthropic's Claude Opus 4.5 AI model.
+
 ## Features
 
 - **Automated Slate Fetching**: Automatically retrieves today's NBA games from the official NBA API
