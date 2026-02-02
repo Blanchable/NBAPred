@@ -30,17 +30,17 @@ FACTOR_WEIGHTS = {
     "lineup_net_rating": 14,     # Lineup-adjusted net rating
     "star_availability": 13,     # Injury impact on key players
     "off_vs_def": 8,             # Offensive vs defensive matchup
-    "turnover_diff": 7,          # Ball security
-    "shot_quality": 7,           # eFG% advantage
-    "three_point_edge": 7,       # 3P shooting edge
-    "free_throw_rate": 6,        # Getting to the line
-    "rebounding": 6,             # Board control
+    "turnover_diff": 6,          # Ball security
+    "shot_quality": 6,           # eFG% advantage
+    "three_point_edge": 6,       # 3P shooting edge
+    "free_throw_rate": 5,        # Getting to the line
+    "rebounding": 5,             # Board control
     "home_road_split": 5,        # Home/road performance (NEW)
     "home_court": 4,             # Basic home advantage (reduced)
     "rest_fatigue": 5,           # Rest days
     "rim_protection": 4,         # Interior defense
     "perimeter_defense": 4,      # Perimeter D
-    "matchup_fit": 4,            # Style matchup (Four Factors)
+    "matchup_fit": 3,            # Style matchup (Four Factors)
     "bench_depth": 4,            # Rotation quality
     "pace_control": 3,           # Tempo
     "late_game_creation": 3,     # Clutch proxy
