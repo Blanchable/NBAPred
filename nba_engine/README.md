@@ -121,40 +121,64 @@ After running, the `outputs/` folder will contain:
 | `status` | Out, Doubtful, Questionable, or Probable |
 | `reason` | Injury/reason description |
 
-## Model Details
+## Model Details (v2 - 20 Factor Point System)
 
-### V1 Prediction Formula
+### How It Works
 
-The model uses a simple but effective approach:
+The v2 model evaluates each game using **20 weighted factors** that sum to 100 points. Each factor produces a signed value from -1 (away advantage) to +1 (home advantage), which is multiplied by its weight.
+
+### The 20 Factors
+
+| # | Factor | Weight | Description |
+|---|--------|--------|-------------|
+| 1 | Net Rating | 14 | Overall team strength (points per 100 possessions) |
+| 2 | Star Availability | 13 | Impact of injuries on key players |
+| 3 | Off vs Def Efficiency | 8 | Matchup-specific scoring efficiency |
+| 4 | Turnover Differential | 7 | Ball security advantage |
+| 5 | Shot Quality | 7 | Effective field goal percentage |
+| 6 | 3P Edge | 7 | Three-point shooting volume and accuracy |
+| 7 | Free Throw Rate | 6 | Ability to get to the line |
+| 8 | Rebounding | 6 | Overall rebounding advantage |
+| 9 | Home Court | 5 | Fixed home court advantage |
+| 10 | Rest/Fatigue | 5 | Days since last game |
+| 11 | Rim Protection | 4 | Interior defense |
+| 12 | Perimeter Defense | 4 | Opponent 3P% allowed |
+| 13 | Matchup Fit | 4 | Style compatibility |
+| 14 | Bench Depth | 4 | Rotation quality |
+| 15 | Pace Control | 3 | Tempo advantage |
+| 16 | Late Game Creation | 3 | Clutch performance proxy |
+| 17 | Coaching | 3 | Neutral in v2 (no data) |
+| 18 | Foul Trouble Risk | 2 | Team foul rate |
+| 19 | Shooting Variance | 2 | 3P reliance (variance) |
+| 20 | Motivation | 1 | Neutral in v2 (no data) |
+
+### Edge Score to Win Probability
 
 ```
-ProjectedMarginHome = (home_net - away_net) × NET_SCALE + HOME_COURT_POINTS
-
-Where:
-- home_net = Home team's net rating (per 100 possessions)
-- away_net = Away team's net rating (per 100 possessions)
-- NET_SCALE = 0.5 (converts rating differential to game margin)
-- HOME_COURT_POINTS = 2.0 (fixed home court advantage)
+EdgeScore = Σ(weight_i × signed_value_i)  # Range: -100 to +100
+WinProbHome = 1 / (1 + exp(-EdgeScore / 12.0))
+ProjectedMargin = EdgeScore / 6.0
 ```
 
-Win probability uses a logistic function:
+### Output Columns
 
-```
-WinProbHome = 1 / (1 + exp(-ProjectedMarginHome / PROB_SCALE))
+| Column | Description |
+|--------|-------------|
+| `predicted_winner` | Team abbreviation of predicted winner |
+| `edge_score` | Total edge score (-100 to +100) |
+| `home_win_prob` | Home team win probability |
+| `away_win_prob` | Away team win probability |
+| `projected_margin_home` | Projected point margin |
+| `top_5_factors` | Top 5 contributing factors |
 
-Where:
-- PROB_SCALE = 7.0 (controls steepness of probability curve)
-```
+### Factor Breakdown Tab
 
-### Constants (Placeholders for V1)
-
-These constants can be tuned in future versions:
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `NET_SCALE` | 0.5 | Maps per-100 possession rating to game margin |
-| `HOME_COURT_POINTS` | 2.0 | Fixed home court advantage in points |
-| `PROB_SCALE` | 7.0 | Controls win probability curve steepness |
+The GUI includes a "Factor Breakdown" tab that shows all 20 factors for each game:
+- **Factor Name**: The factor being evaluated
+- **Weight**: How much this factor matters (out of 100)
+- **Signed Value**: Direction and magnitude (-1 to +1)
+- **Contribution**: Weight × Signed Value
+- **Inputs Used**: The actual data used for calculation
 
 ## Data Sources
 

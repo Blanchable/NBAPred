@@ -4,6 +4,8 @@ Schedule module for fetching today's NBA games and team statistics.
 Uses nba_api to fetch:
 - Today's game slate from live scoreboard
 - Team ratings (offensive, defensive, net) from league stats
+- Advanced team stats for the point system
+- Schedule history for rest day calculations
 """
 
 from dataclasses import dataclass
@@ -13,7 +15,8 @@ import time
 
 import requests
 from nba_api.live.nba.endpoints import scoreboard
-from nba_api.stats.endpoints import leaguedashteamstats
+from nba_api.stats.endpoints import leaguedashteamstats, teamgamelog
+from nba_api.stats.static import teams as nba_teams
 
 
 # Custom headers to avoid NBA API blocks
@@ -24,6 +27,9 @@ HEADERS = {
     'Origin': 'https://www.nba.com',
     'Referer': 'https://www.nba.com/',
 }
+
+# Team abbreviation to ID mapping
+TEAM_IDS = {team['abbreviation']: team['id'] for team in nba_teams.get_teams()}
 
 
 @dataclass
@@ -43,6 +49,51 @@ class TeamRating:
     def_rating: float
     net_rating: float
     pace: float
+
+
+@dataclass
+class TeamAdvancedStats:
+    """Advanced team statistics for the point system."""
+    team_abbrev: str
+    # Basic ratings
+    off_rating: float = 110.0
+    def_rating: float = 110.0
+    net_rating: float = 0.0
+    pace: float = 100.0
+    # Shooting
+    efg_pct: float = 0.52
+    fg3_pct: float = 0.36
+    fg3a_rate: float = 0.40
+    ft_rate: float = 0.25
+    # Ball movement
+    tov_pct: float = 14.0
+    # Rebounding
+    oreb_pct: float = 25.0
+    dreb_pct: float = 75.0
+    reb_pct: float = 50.0
+    # Defense
+    opp_fg3_pct: float = 0.36
+    # Fouls
+    pf_per_game: float = 20.0
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for point system."""
+        return {
+            'off_rating': self.off_rating,
+            'def_rating': self.def_rating,
+            'net_rating': self.net_rating,
+            'pace': self.pace,
+            'efg_pct': self.efg_pct,
+            'fg3_pct': self.fg3_pct,
+            'fg3a_rate': self.fg3a_rate,
+            'ft_rate': self.ft_rate,
+            'tov_pct': self.tov_pct,
+            'oreb_pct': self.oreb_pct,
+            'dreb_pct': self.dreb_pct,
+            'reb_pct': self.reb_pct,
+            'opp_fg3_pct': self.opp_fg3_pct,
+            'pf_per_game': self.pf_per_game,
+        }
 
 
 def get_todays_games(max_retries: int = 3, retry_delay: float = 2.0) -> list[Game]:
@@ -154,6 +205,156 @@ def get_team_ratings(
     return get_fallback_ratings()
 
 
+def get_advanced_team_stats(
+    season: str = "2024-25",
+    max_retries: int = 2,
+    timeout: int = 60,
+) -> dict[str, dict]:
+    """
+    Fetch advanced team statistics for the point system.
+    
+    Returns a dict mapping team abbreviation to stats dict.
+    """
+    print("  Fetching advanced team stats...")
+    
+    for attempt in range(max_retries):
+        try:
+            # Get base stats
+            base_stats = leaguedashteamstats.LeagueDashTeamStats(
+                season=season,
+                season_type_all_star="Regular Season",
+                per_mode_detailed="PerGame",
+                timeout=timeout,
+                headers=HEADERS,
+            )
+            base_df = base_stats.get_data_frames()[0]
+            
+            # Get per 100 possessions for ratings
+            per100_stats = leaguedashteamstats.LeagueDashTeamStats(
+                season=season,
+                season_type_all_star="Regular Season",
+                per_mode_detailed="Per100Possessions",
+                timeout=timeout,
+                headers=HEADERS,
+            )
+            per100_df = per100_stats.get_data_frames()[0]
+            
+            team_stats = {}
+            
+            for _, row in base_df.iterrows():
+                abbrev = row["TEAM_ABBREVIATION"]
+                
+                # Get per 100 row for this team
+                per100_row = per100_df[per100_df["TEAM_ABBREVIATION"] == abbrev]
+                if len(per100_row) > 0:
+                    per100_row = per100_row.iloc[0]
+                else:
+                    per100_row = row
+                
+                # Calculate derived stats
+                fga = float(row.get("FGA", 80) or 80)
+                fg3a = float(row.get("FG3A", 35) or 35)
+                fta = float(row.get("FTA", 20) or 20)
+                
+                fg3a_rate = fg3a / fga if fga > 0 else 0.40
+                ft_rate = fta / fga if fga > 0 else 0.25
+                
+                # Estimate turnover percentage
+                tov = float(row.get("TOV", 14) or 14)
+                poss_est = fga + 0.44 * fta + tov
+                tov_pct = (tov / poss_est * 100) if poss_est > 0 else 14.0
+                
+                # Rebounding
+                oreb = float(row.get("OREB", 10) or 10)
+                dreb = float(row.get("DREB", 35) or 35)
+                total_reb = oreb + dreb
+                
+                stats = TeamAdvancedStats(
+                    team_abbrev=abbrev,
+                    off_rating=float(per100_row.get("OFF_RATING", 110) or 110),
+                    def_rating=float(per100_row.get("DEF_RATING", 110) or 110),
+                    net_rating=float(per100_row.get("NET_RATING", 0) or 0),
+                    pace=float(per100_row.get("PACE", 100) or 100),
+                    efg_pct=float(row.get("EFG_PCT", 0.52) or 0.52),
+                    fg3_pct=float(row.get("FG3_PCT", 0.36) or 0.36),
+                    fg3a_rate=fg3a_rate,
+                    ft_rate=ft_rate,
+                    tov_pct=tov_pct,
+                    oreb_pct=oreb / total_reb * 100 if total_reb > 0 else 25.0,
+                    dreb_pct=dreb / total_reb * 100 if total_reb > 0 else 75.0,
+                    reb_pct=50.0,  # Need opponent rebounds to calculate properly
+                    opp_fg3_pct=0.36,  # Would need opponent stats
+                    pf_per_game=float(row.get("PF", 20) or 20),
+                )
+                
+                team_stats[abbrev] = stats.to_dict()
+            
+            print(f"  Loaded advanced stats for {len(team_stats)} teams.")
+            return team_stats
+            
+        except Exception as e:
+            print(f"  Advanced stats attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+    
+    # Return fallback stats
+    print("  Using fallback advanced stats...")
+    return get_fallback_advanced_stats()
+
+
+def get_team_rest_days(
+    teams: list[str],
+    season: str = "2024-25",
+    timeout: int = 30,
+) -> dict[str, int]:
+    """
+    Get days since last game for each team.
+    
+    Args:
+        teams: List of team abbreviations.
+        season: NBA season string.
+        timeout: Request timeout in seconds.
+    
+    Returns:
+        Dict mapping team abbreviation to days since last game.
+    """
+    rest_days = {team: 1 for team in teams}  # Default to 1 day rest
+    today = datetime.now().date()
+    
+    for team in teams:
+        try:
+            team_id = TEAM_IDS.get(team)
+            if not team_id:
+                continue
+            
+            # Get recent games
+            game_log = teamgamelog.TeamGameLog(
+                team_id=team_id,
+                season=season,
+                timeout=timeout,
+                headers=HEADERS,
+            )
+            
+            df = game_log.get_data_frames()[0]
+            
+            if len(df) > 0:
+                # Most recent game date
+                last_game_str = df.iloc[0]["GAME_DATE"]
+                # Parse date (format: "MMM DD, YYYY" or similar)
+                try:
+                    last_game = datetime.strptime(last_game_str, "%b %d, %Y").date()
+                    days = (today - last_game).days
+                    rest_days[team] = max(0, days)
+                except:
+                    pass
+                    
+        except Exception as e:
+            # Silently use default
+            pass
+    
+    return rest_days
+
+
 def get_fallback_ratings() -> dict[str, TeamRating]:
     """
     Return fallback team ratings based on approximate 2024-25 season data.
@@ -213,6 +414,38 @@ def get_fallback_ratings() -> dict[str, TeamRating]:
         )
     
     return ratings
+
+
+def get_fallback_advanced_stats() -> dict[str, dict]:
+    """
+    Return fallback advanced stats when API fails.
+    """
+    # Use basic ratings and estimate other stats
+    ratings = get_fallback_ratings()
+    stats = {}
+    
+    for abbrev, rating in ratings.items():
+        # Estimate other stats based on team strength
+        strength = (rating.net_rating + 12) / 24  # Normalize to 0-1
+        
+        stats[abbrev] = {
+            'off_rating': rating.off_rating,
+            'def_rating': rating.def_rating,
+            'net_rating': rating.net_rating,
+            'pace': rating.pace,
+            'efg_pct': 0.50 + strength * 0.06,  # 50-56%
+            'fg3_pct': 0.34 + strength * 0.04,  # 34-38%
+            'fg3a_rate': 0.38 + strength * 0.06,  # 38-44%
+            'ft_rate': 0.22 + strength * 0.06,  # 22-28%
+            'tov_pct': 15.0 - strength * 3.0,  # 12-15%
+            'oreb_pct': 24.0 + strength * 4.0,  # 24-28%
+            'dreb_pct': 74.0 + strength * 4.0,  # 74-78%
+            'reb_pct': 49.0 + strength * 4.0,  # 49-53%
+            'opp_fg3_pct': 0.38 - strength * 0.04,  # 34-38%
+            'pf_per_game': 21.0 - strength * 3.0,  # 18-21
+        }
+    
+    return stats
 
 
 def get_current_season() -> str:

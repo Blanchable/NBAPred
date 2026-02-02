@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-NBA Prediction Engine - GUI Application
+NBA Prediction Engine - GUI Application (v2)
 
-A simple GUI that fetches today's NBA predictions and displays them
-in an easy-to-read format.
+A GUI that fetches today's NBA predictions using the 20-factor weighted
+point system and displays them in an easy-to-read format.
 """
 
 import threading
@@ -23,13 +23,18 @@ else:
 
 sys.path.insert(0, str(APP_DIR))
 
-from ingest.schedule import get_todays_games, get_team_ratings, get_current_season
+from ingest.schedule import (
+    get_todays_games,
+    get_advanced_team_stats,
+    get_team_rest_days,
+    get_current_season,
+)
 from ingest.injuries import (
     find_latest_injury_pdf,
     download_injury_pdf,
     parse_injury_pdf,
 )
-from model.pregame import predict_games
+from model.point_system import score_game, GameScore
 
 
 class NBAPredictor(tk.Tk):
@@ -38,9 +43,9 @@ class NBAPredictor(tk.Tk):
     def __init__(self):
         super().__init__()
         
-        self.title("NBA Prediction Engine v1")
-        self.geometry("900x700")
-        self.minsize(700, 500)
+        self.title("NBA Prediction Engine v2 - 20 Factor System")
+        self.geometry("1100x750")
+        self.minsize(900, 600)
         
         # Configure style
         self.style = ttk.Style()
@@ -83,7 +88,7 @@ class NBAPredictor(tk.Tk):
         
         title_label = ttk.Label(
             header_frame, 
-            text="🏀 NBA Prediction Engine",
+            text="🏀 NBA Prediction Engine v2",
             style='Header.TLabel'
         )
         title_label.pack(side=tk.LEFT)
@@ -136,6 +141,13 @@ class NBAPredictor(tk.Tk):
         # Create predictions treeview
         self.create_predictions_tree()
         
+        # Factors tab
+        self.factors_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.factors_frame, text="📈 Factor Breakdown")
+        
+        # Create factors view
+        self.create_factors_view()
+        
         # Injuries tab
         self.injuries_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.injuries_frame, text="🏥 Injuries")
@@ -158,7 +170,7 @@ class NBAPredictor(tk.Tk):
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Store data
-        self.predictions = []
+        self.scores = []
         self.injuries = []
         
         # Progress bar
@@ -178,8 +190,8 @@ class NBAPredictor(tk.Tk):
         scrollbar = ttk.Scrollbar(tree_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # Treeview
-        columns = ('matchup', 'margin', 'home_prob', 'away_prob', 'time')
+        # Treeview with new columns
+        columns = ('matchup', 'pick', 'edge', 'home_prob', 'away_prob', 'margin', 'top_factors')
         self.pred_tree = ttk.Treeview(
             tree_frame,
             columns=columns,
@@ -189,25 +201,76 @@ class NBAPredictor(tk.Tk):
         
         # Configure columns
         self.pred_tree.heading('matchup', text='Matchup')
-        self.pred_tree.heading('margin', text='Projected Margin')
+        self.pred_tree.heading('pick', text='PICK')
+        self.pred_tree.heading('edge', text='Edge Score')
         self.pred_tree.heading('home_prob', text='Home Win %')
         self.pred_tree.heading('away_prob', text='Away Win %')
-        self.pred_tree.heading('time', text='Start Time (UTC)')
+        self.pred_tree.heading('margin', text='Proj. Margin')
+        self.pred_tree.heading('top_factors', text='Top Factors')
         
-        self.pred_tree.column('matchup', width=150, anchor='center')
-        self.pred_tree.column('margin', width=120, anchor='center')
-        self.pred_tree.column('home_prob', width=100, anchor='center')
-        self.pred_tree.column('away_prob', width=100, anchor='center')
-        self.pred_tree.column('time', width=150, anchor='center')
+        self.pred_tree.column('matchup', width=120, anchor='center')
+        self.pred_tree.column('pick', width=60, anchor='center')
+        self.pred_tree.column('edge', width=80, anchor='center')
+        self.pred_tree.column('home_prob', width=85, anchor='center')
+        self.pred_tree.column('away_prob', width=85, anchor='center')
+        self.pred_tree.column('margin', width=85, anchor='center')
+        self.pred_tree.column('top_factors', width=400, anchor='w')
         
         self.pred_tree.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.pred_tree.yview)
         
-        # Style alternating rows - light colors for readability
-        self.pred_tree.tag_configure('oddrow', background='#f0f0f5', foreground='#000000')
-        self.pred_tree.tag_configure('evenrow', background='#ffffff', foreground='#000000')
-        self.pred_tree.tag_configure('home_favorite', background='#d4edda', foreground='#155724')
-        self.pred_tree.tag_configure('away_favorite', background='#fff3cd', foreground='#856404')
+        # Style rows - light colors for readability
+        self.pred_tree.tag_configure('home_pick', background='#d4edda', foreground='#155724')
+        self.pred_tree.tag_configure('away_pick', background='#fff3cd', foreground='#856404')
+        self.pred_tree.tag_configure('strong_home', background='#b8daff', foreground='#004085')
+        self.pred_tree.tag_configure('strong_away', background='#f5c6cb', foreground='#721c24')
+        
+    def create_factors_view(self):
+        """Create the factors breakdown view."""
+        # Top frame for game selector
+        selector_frame = ttk.Frame(self.factors_frame)
+        selector_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(selector_frame, text="Select Game:", foreground='#ffffff').pack(side=tk.LEFT)
+        
+        self.game_selector = ttk.Combobox(selector_frame, state='readonly', width=30)
+        self.game_selector.pack(side=tk.LEFT, padx=10)
+        self.game_selector.bind('<<ComboboxSelected>>', self.on_game_selected)
+        
+        # Create factors treeview
+        tree_frame = ttk.Frame(self.factors_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        scrollbar = ttk.Scrollbar(tree_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        columns = ('factor', 'weight', 'signed', 'contribution', 'inputs')
+        self.factors_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show='headings',
+            yscrollcommand=scrollbar.set
+        )
+        
+        self.factors_tree.heading('factor', text='Factor')
+        self.factors_tree.heading('weight', text='Weight')
+        self.factors_tree.heading('signed', text='Signed Value')
+        self.factors_tree.heading('contribution', text='Contribution')
+        self.factors_tree.heading('inputs', text='Inputs Used')
+        
+        self.factors_tree.column('factor', width=160, anchor='w')
+        self.factors_tree.column('weight', width=60, anchor='center')
+        self.factors_tree.column('signed', width=90, anchor='center')
+        self.factors_tree.column('contribution', width=90, anchor='center')
+        self.factors_tree.column('inputs', width=400, anchor='w')
+        
+        self.factors_tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.factors_tree.yview)
+        
+        # Color tags
+        self.factors_tree.tag_configure('positive', background='#d4edda', foreground='#155724')
+        self.factors_tree.tag_configure('negative', background='#f8d7da', foreground='#721c24')
+        self.factors_tree.tag_configure('neutral', background='#ffffff', foreground='#333333')
         
     def create_injuries_tree(self):
         """Create the injuries treeview widget."""
@@ -268,6 +331,9 @@ class NBAPredictor(tk.Tk):
             self.pred_tree.delete(item)
         for item in self.inj_tree.get_children():
             self.inj_tree.delete(item)
+        for item in self.factors_tree.get_children():
+            self.factors_tree.delete(item)
+        self.game_selector['values'] = []
         self.log_text.delete(1.0, tk.END)
         
         # Run in background thread
@@ -290,19 +356,32 @@ class NBAPredictor(tk.Tk):
             for game in games:
                 self.log(f"  {game.away_team} @ {game.home_team}")
             
-            # Step 2: Fetch team ratings
-            self.log("\nFetching team ratings...")
+            # Step 2: Fetch advanced team stats
+            self.log("\nFetching advanced team stats...")
             season = get_current_season()
             self.log(f"Season: {season}")
             
-            ratings = get_team_ratings(season=season)
+            team_stats = get_advanced_team_stats(season=season)
             
-            if ratings:
-                self.log(f"Loaded ratings for {len(ratings)} teams.")
+            if team_stats:
+                self.log(f"Loaded stats for {len(team_stats)} teams.")
             else:
-                self.log("Warning: Could not load team ratings. Using defaults.")
+                self.log("Warning: Could not load team stats. Using defaults.")
             
-            # Step 3: Find and download injury report
+            # Step 3: Get rest days
+            self.log("\nCalculating rest days...")
+            teams_playing = list(set(
+                [g.away_team for g in games] + [g.home_team for g in games]
+            ))
+            
+            try:
+                rest_days = get_team_rest_days(teams_playing, season=season)
+                self.log(f"Calculated rest days for {len(rest_days)} teams.")
+            except Exception as e:
+                self.log(f"Could not get rest days: {e}")
+                rest_days = {t: 1 for t in teams_playing}
+            
+            # Step 4: Find and download injury report
             self.log("\nSearching for latest injury report...")
             output_dir = APP_DIR / "outputs"
             output_dir.mkdir(exist_ok=True)
@@ -328,10 +407,29 @@ class NBAPredictor(tk.Tk):
                 self.log("No recent injury report found.")
                 self.injuries = []
             
-            # Step 4: Generate predictions
-            self.log("\nGenerating predictions...")
-            self.predictions = predict_games(games, ratings)
-            self.log(f"Generated {len(self.predictions)} predictions.")
+            # Step 5: Generate predictions using point system
+            self.log("\nGenerating predictions (20-factor system)...")
+            self.scores = []
+            
+            for game in games:
+                home_rest = rest_days.get(game.home_team, 1)
+                away_rest = rest_days.get(game.away_team, 1)
+                
+                score = score_game(
+                    home_team=game.home_team,
+                    away_team=game.away_team,
+                    team_stats=team_stats,
+                    injuries=self.injuries,
+                    player_stats={},
+                    home_rest_days=home_rest,
+                    away_rest_days=away_rest,
+                )
+                self.scores.append(score)
+            
+            # Sort by confidence
+            self.scores.sort(key=lambda s: abs(s.edge_score_total), reverse=True)
+            
+            self.log(f"Generated {len(self.scores)} predictions.")
             
             # Update UI on main thread
             self.after(0, self.update_ui)
@@ -346,26 +444,36 @@ class NBAPredictor(tk.Tk):
     def update_ui(self):
         """Update the UI with fetched data."""
         # Update predictions tree
-        for i, pred in enumerate(self.predictions):
-            matchup = f"{pred.away_team} @ {pred.home_team}"
-            margin = f"{pred.projected_margin_home:+.1f}"
-            home_prob = f"{pred.home_win_prob:.1%}"
-            away_prob = f"{pred.away_win_prob:.1%}"
-            time_str = pred.start_time_utc[:16] if pred.start_time_utc else "TBD"
+        for score in self.scores:
+            matchup = f"{score.away_team} @ {score.home_team}"
+            edge = f"{score.edge_score_total:+.1f}"
+            home_prob = f"{score.home_win_prob:.1%}"
+            away_prob = f"{score.away_win_prob:.1%}"
+            margin = f"{score.projected_margin_home:+.1f}"
             
-            # Determine row color based on favorite
-            if pred.home_win_prob > 0.60:
-                tag = 'home_favorite'  # Green - home team favored
-            elif pred.away_win_prob > 0.60:
-                tag = 'away_favorite'  # Yellow - away team favored
+            # Determine row color based on pick confidence
+            if score.home_win_prob > 0.65:
+                tag = 'strong_home'
+            elif score.home_win_prob > 0.50:
+                tag = 'home_pick'
+            elif score.away_win_prob > 0.65:
+                tag = 'strong_away'
             else:
-                tag = 'evenrow' if i % 2 == 0 else 'oddrow'
+                tag = 'away_pick'
             
             self.pred_tree.insert(
                 '', 'end',
-                values=(matchup, margin, home_prob, away_prob, time_str),
+                values=(matchup, score.predicted_winner, edge, home_prob, 
+                        away_prob, margin, score.top_5_factors_str),
                 tags=(tag,)
             )
+        
+        # Update game selector for factors tab
+        game_options = [f"{s.away_team} @ {s.home_team}" for s in self.scores]
+        self.game_selector['values'] = game_options
+        if game_options:
+            self.game_selector.current(0)
+            self.on_game_selected(None)
         
         # Update injuries tree
         for injury in self.injuries:
@@ -375,13 +483,47 @@ class NBAPredictor(tk.Tk):
                 tags=(injury.status,)
             )
     
+    def on_game_selected(self, event):
+        """Handle game selection in factors tab."""
+        # Clear existing factors
+        for item in self.factors_tree.get_children():
+            self.factors_tree.delete(item)
+        
+        selection = self.game_selector.get()
+        if not selection:
+            return
+        
+        # Find the selected game score
+        for score in self.scores:
+            matchup = f"{score.away_team} @ {score.home_team}"
+            if matchup == selection:
+                # Display factors
+                for factor in sorted(score.factors, key=lambda f: abs(f.contribution), reverse=True):
+                    signed = f"{factor.signed_value:+.3f}"
+                    contrib = f"{factor.contribution:+.2f}"
+                    
+                    if factor.contribution > 0.5:
+                        tag = 'positive'
+                    elif factor.contribution < -0.5:
+                        tag = 'negative'
+                    else:
+                        tag = 'neutral'
+                    
+                    self.factors_tree.insert(
+                        '', 'end',
+                        values=(factor.display_name, factor.weight, signed, 
+                                contrib, factor.inputs_used),
+                        tags=(tag,)
+                    )
+                break
+    
     def fetch_complete(self, success: bool, message: str):
         """Called when fetch is complete."""
         self.progress.stop()
         self.progress.pack_forget()
         self.fetch_button.config(state=tk.NORMAL)
         
-        if success and self.predictions:
+        if success and self.scores:
             self.save_button.config(state=tk.NORMAL)
         
         self.status_var.set(message)
@@ -397,21 +539,41 @@ class NBAPredictor(tk.Tk):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # Save predictions
-            if self.predictions:
+            if self.scores:
                 pred_data = []
-                for pred in self.predictions:
+                for score in self.scores:
                     pred_data.append({
-                        "away_team": pred.away_team,
-                        "home_team": pred.home_team,
-                        "projected_margin_home": pred.projected_margin_home,
-                        "home_win_prob": pred.home_win_prob,
-                        "away_win_prob": pred.away_win_prob,
-                        "start_time_utc": pred.start_time_utc,
+                        "away_team": score.away_team,
+                        "home_team": score.home_team,
+                        "predicted_winner": score.predicted_winner,
+                        "edge_score": score.edge_score_total,
+                        "home_win_prob": score.home_win_prob,
+                        "away_win_prob": score.away_win_prob,
+                        "projected_margin_home": score.projected_margin_home,
+                        "top_5_factors": score.top_5_factors_str,
                     })
                 
                 pred_path = output_dir / f"predictions_{timestamp}.csv"
                 pd.DataFrame(pred_data).to_csv(pred_path, index=False)
                 self.log(f"\nSaved predictions to: {pred_path.name}")
+                
+                # Save factors
+                factors_data = []
+                for score in self.scores:
+                    matchup = f"{score.away_team}@{score.home_team}"
+                    for factor in score.factors:
+                        factors_data.append({
+                            "matchup": matchup,
+                            "factor_name": factor.display_name,
+                            "weight": factor.weight,
+                            "signed_value": round(factor.signed_value, 3),
+                            "contribution": round(factor.contribution, 2),
+                            "inputs_used": factor.inputs_used,
+                        })
+                
+                factors_path = output_dir / f"factors_{timestamp}.csv"
+                pd.DataFrame(factors_data).to_csv(factors_path, index=False)
+                self.log(f"Saved factors to: {factors_path.name}")
             
             # Save injuries
             if self.injuries:
