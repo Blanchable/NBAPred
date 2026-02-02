@@ -265,14 +265,34 @@ class PredictionLogger:
         return current_scale  # Well calibrated
 
 
-# Default edge scale (can be adjusted based on calibration)
-EDGE_SCALE = 12.0
+# Calibration constants
+EDGE_TO_MARGIN = 4.5  # Edge score to margin mapping
+MARGIN_PROB_SCALE = 7.0  # Margin to probability scale
+PROB_MIN = 0.05
+PROB_MAX = 0.95
 
-def edge_to_win_prob(edge_score: float, scale: float = EDGE_SCALE) -> float:
-    """Convert edge score to win probability."""
-    from math import exp
-    return 1.0 / (1.0 + exp(-edge_score / scale))
 
-def edge_to_margin(edge_score: float, scale: float = 6.0) -> float:
+def edge_to_margin(edge_score: float, scale: float = EDGE_TO_MARGIN) -> float:
     """Convert edge score to projected margin."""
     return edge_score / scale
+
+
+def margin_to_win_prob(margin: float, scale: float = MARGIN_PROB_SCALE) -> float:
+    """
+    Convert projected margin to win probability.
+    
+    Reference:
+        margin  0 -> 50%
+        margin  3 -> 60%
+        margin  5 -> 67%
+        margin 10 -> 81%
+    """
+    from math import exp
+    raw_prob = 1.0 / (1.0 + exp(-margin / scale))
+    return max(PROB_MIN, min(PROB_MAX, raw_prob))
+
+
+def edge_to_win_prob(edge_score: float) -> float:
+    """Convert edge score to win probability via margin."""
+    margin = edge_to_margin(edge_score)
+    return margin_to_win_prob(margin)

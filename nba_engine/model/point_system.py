@@ -95,11 +95,17 @@ SCALES = {
     "availability": 0.25,
 }
 
-# Edge score to win probability scale
-EDGE_SCALE = 12.0
-
 # Edge score to margin mapping
-MARGIN_SCALE = 6.0
+# Edge scores typically range 15-30, we want margins 3-7
+EDGE_TO_MARGIN = 4.5
+
+# Margin to probability scale
+# margin 0 -> 50%, margin 3 -> ~60%, margin 5 -> ~67%, margin 10 -> ~80%
+MARGIN_PROB_SCALE = 7.0
+
+# Probability clamps to prevent overconfidence
+PROB_MIN = 0.05
+PROB_MAX = 0.95
 
 
 # ============================================================================
@@ -170,14 +176,56 @@ def safe_get(stats: dict, key: str, default: float = 0.0) -> float:
         return default
 
 
-def edge_to_win_prob(edge_score: float, scale: float = EDGE_SCALE) -> float:
-    """Convert edge score to win probability using logistic function."""
-    return 1.0 / (1.0 + exp(-edge_score / scale))
-
-
-def edge_to_margin(edge_score: float, scale: float = MARGIN_SCALE) -> float:
-    """Convert edge score to projected point margin."""
+def edge_to_margin(edge_score: float, scale: float = EDGE_TO_MARGIN) -> float:
+    """
+    Convert edge score to projected point margin.
+    
+    Args:
+        edge_score: Total edge score from factors (-100 to +100 range).
+        scale: Divisor to convert to margin (default 4.5).
+    
+    Returns:
+        Projected margin in points.
+    """
     return edge_score / scale
+
+
+def margin_to_win_prob(margin: float, scale: float = MARGIN_PROB_SCALE) -> float:
+    """
+    Convert projected margin to win probability using logistic function.
+    
+    This is the CANONICAL probability calculation. Probabilities should
+    always be derived from margin, not from edge score directly.
+    
+    Reference probabilities:
+        margin  0 -> 50%
+        margin  3 -> 60%
+        margin  5 -> 67%
+        margin  7 -> 73%
+        margin 10 -> 81%
+        margin 15 -> 89%
+    
+    Args:
+        margin: Projected point margin (positive = home favored).
+        scale: Controls steepness (default 7.0).
+    
+    Returns:
+        Win probability clamped to [0.05, 0.95].
+    """
+    raw_prob = 1.0 / (1.0 + exp(-margin / scale))
+    # Clamp to prevent overconfidence
+    return max(PROB_MIN, min(PROB_MAX, raw_prob))
+
+
+# Legacy function for backwards compatibility
+def edge_to_win_prob(edge_score: float, scale: float = EDGE_TO_MARGIN) -> float:
+    """
+    DEPRECATED: Use margin_to_win_prob instead.
+    
+    This converts edge directly to probability via margin for compatibility.
+    """
+    margin = edge_to_margin(edge_score, scale)
+    return margin_to_win_prob(margin)
 
 
 def calculate_power_rating(
@@ -671,12 +719,17 @@ def score_game_v3(
     # Sum contributions
     edge_score_total = sum(f.contribution for f in factors)
     
-    # Convert to probabilities
-    home_win_prob = edge_to_win_prob(edge_score_total)
+    # STEP 1: Convert edge score to projected margin
+    projected_margin = edge_to_margin(edge_score_total)
+    
+    # STEP 2: Convert margin to win probability (NOT edge score!)
+    # This prevents overconfident probabilities
+    home_win_prob = margin_to_win_prob(projected_margin)
     away_win_prob = 1.0 - home_win_prob
     
-    # Convert to margin
-    projected_margin = edge_to_margin(edge_score_total)
+    # Sanity check: warn if probability seems wrong
+    if abs(projected_margin) < 6 and home_win_prob > 0.85:
+        print(f"  Warning: margin={projected_margin:.1f} but prob={home_win_prob:.1%} - check calibration")
     
     # Determine predicted winner
     if home_win_prob > 0.5:
@@ -765,4 +818,63 @@ def validate_system():
         if key not in FACTOR_NAMES:
             errors.append(f"Missing display name for factor: {key}")
     
+    # Validate probability calibration
+    calibration_errors = validate_probability_calibration()
+    errors.extend(calibration_errors)
+    
     return errors
+
+
+def validate_probability_calibration():
+    """
+    Validate that probability calibration is producing reasonable values.
+    
+    Expected ranges:
+        margin  0 -> ~50%
+        margin  3 -> ~60%
+        margin  5 -> ~67%
+        margin 10 -> ~80%
+    """
+    errors = []
+    
+    # Test cases: (margin, expected_min, expected_max)
+    test_cases = [
+        (0, 0.48, 0.52),    # Even game -> ~50%
+        (3, 0.55, 0.65),    # Small edge -> ~60%
+        (5, 0.62, 0.72),    # Medium edge -> ~67%
+        (10, 0.75, 0.87),   # Large edge -> ~80%
+        (-5, 0.28, 0.38),   # Away favored -> ~33%
+    ]
+    
+    for margin, exp_min, exp_max in test_cases:
+        prob = margin_to_win_prob(margin)
+        if not (exp_min <= prob <= exp_max):
+            errors.append(
+                f"Calibration error: margin={margin} gives prob={prob:.1%}, "
+                f"expected {exp_min:.0%}-{exp_max:.0%}"
+            )
+    
+    # Verify clamps work
+    extreme_prob = margin_to_win_prob(50)  # Huge margin
+    if extreme_prob > PROB_MAX:
+        errors.append(f"Probability clamp not working: margin=50 gives {extreme_prob:.1%}")
+    
+    return errors
+
+
+def print_calibration_table():
+    """Print a reference table of margin -> probability mappings."""
+    print("\nProbability Calibration Reference:")
+    print("-" * 40)
+    print(f"{'Margin':<10} {'Home Win %':<12} {'Away Win %':<12}")
+    print("-" * 40)
+    
+    for margin in [-10, -7, -5, -3, 0, 3, 5, 7, 10, 15]:
+        home_prob = margin_to_win_prob(margin)
+        away_prob = 1.0 - home_prob
+        print(f"{margin:>+6.1f}     {home_prob:>10.1%}   {away_prob:>10.1%}")
+    
+    print("-" * 40)
+    print(f"Constants: EDGE_TO_MARGIN={EDGE_TO_MARGIN}, MARGIN_PROB_SCALE={MARGIN_PROB_SCALE}")
+    print(f"Probability clamped to [{PROB_MIN:.0%}, {PROB_MAX:.0%}]")
+    print()

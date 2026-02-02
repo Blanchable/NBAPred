@@ -6,8 +6,14 @@ from .point_system import (
     GameScore,
     FactorResult,
     validate_system,
+    validate_probability_calibration,
+    print_calibration_table,
+    margin_to_win_prob,
+    edge_to_margin,
     FACTOR_WEIGHTS,
     FACTOR_NAMES,
+    EDGE_TO_MARGIN,
+    MARGIN_PROB_SCALE,
 )
 from .lineup_adjustment import (
     calculate_lineup_adjusted_strength,
@@ -19,6 +25,7 @@ from .calibration import (
     PredictionRecord,
     edge_to_win_prob,
     edge_to_margin,
+    margin_to_win_prob,
 )
 
 __all__ = [
