@@ -1,0 +1,6 @@
+nba_api
+requests
+pdfplumber
+pandas
+python-dateutil
+tqdm
