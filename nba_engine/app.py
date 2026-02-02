@@ -155,6 +155,13 @@ class NBAPredictor(tk.Tk):
         # Create injuries treeview
         self.create_injuries_tree()
         
+        # Team Stats tab (for data validation)
+        self.stats_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.stats_frame, text="📋 Team Stats")
+        
+        # Create team stats view
+        self.create_stats_view()
+        
         # Log tab
         self.log_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.log_frame, text="📝 Log")
@@ -172,6 +179,7 @@ class NBAPredictor(tk.Tk):
         # Store data
         self.scores = []
         self.injuries = []
+        self.team_stats = {}  # Store raw team stats for display
         
         # Progress bar
         self.progress = ttk.Progressbar(
@@ -310,6 +318,136 @@ class NBAPredictor(tk.Tk):
         self.inj_tree.tag_configure('Doubtful', background='#ffe5d0', foreground='#8a4500')
         self.inj_tree.tag_configure('Questionable', background='#fff3cd', foreground='#856404')
         self.inj_tree.tag_configure('Probable', background='#d4edda', foreground='#155724')
+    
+    def create_stats_view(self):
+        """Create the team stats validation view."""
+        # Top frame for team selector
+        selector_frame = ttk.Frame(self.stats_frame)
+        selector_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(selector_frame, text="Select Team:", foreground='#ffffff').pack(side=tk.LEFT)
+        
+        self.team_selector = ttk.Combobox(selector_frame, state='readonly', width=30)
+        self.team_selector.pack(side=tk.LEFT, padx=10)
+        self.team_selector.bind('<<ComboboxSelected>>', self.on_team_selected)
+        
+        # Info label
+        self.stats_info = ttk.Label(
+            selector_frame, 
+            text="View raw stats used for predictions",
+            foreground='#aaaaaa'
+        )
+        self.stats_info.pack(side=tk.RIGHT)
+        
+        # Create stats treeview
+        tree_frame = ttk.Frame(self.stats_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        scrollbar = ttk.Scrollbar(tree_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        columns = ('stat', 'value', 'description', 'typical_range')
+        self.stats_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show='headings',
+            yscrollcommand=scrollbar.set
+        )
+        
+        self.stats_tree.heading('stat', text='Statistic')
+        self.stats_tree.heading('value', text='Value')
+        self.stats_tree.heading('description', text='Description')
+        self.stats_tree.heading('typical_range', text='Typical Range')
+        
+        self.stats_tree.column('stat', width=140, anchor='w')
+        self.stats_tree.column('value', width=80, anchor='center')
+        self.stats_tree.column('description', width=300, anchor='w')
+        self.stats_tree.column('typical_range', width=120, anchor='center')
+        
+        self.stats_tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.stats_tree.yview)
+        
+        # Color tags for values
+        self.stats_tree.tag_configure('good', background='#d4edda', foreground='#155724')
+        self.stats_tree.tag_configure('average', background='#ffffff', foreground='#333333')
+        self.stats_tree.tag_configure('poor', background='#f8d7da', foreground='#721c24')
+        
+    def on_team_selected(self, event):
+        """Handle team selection in stats tab."""
+        # Clear existing stats
+        for item in self.stats_tree.get_children():
+            self.stats_tree.delete(item)
+        
+        team = self.team_selector.get()
+        if not team or team not in self.team_stats:
+            return
+        
+        stats = self.team_stats[team]
+        
+        # Define stat metadata: (key, description, typical_low, typical_high, higher_is_better)
+        stat_info = [
+            ('net_rating', 'Net Rating', 'Points per 100 poss differential', -12, 12, True),
+            ('off_rating', 'Offensive Rating', 'Points scored per 100 poss', 105, 120, True),
+            ('def_rating', 'Defensive Rating', 'Points allowed per 100 poss', 105, 120, False),
+            ('pace', 'Pace', 'Possessions per game', 96, 104, None),
+            ('efg_pct', 'Effective FG%', 'FG% adjusted for 3-pointers', 0.48, 0.58, True),
+            ('fg3_pct', '3-Point %', 'Three-point field goal %', 0.33, 0.40, True),
+            ('fg3a_rate', '3PA Rate', '3-point attempts / total FGA', 0.35, 0.50, None),
+            ('ft_rate', 'Free Throw Rate', 'FTA / FGA', 0.20, 0.30, True),
+            ('tov_pct', 'Turnover %', 'Turnovers per 100 poss', 12, 16, False),
+            ('oreb_pct', 'Off Rebound %', '% of available off rebounds', 22, 30, True),
+            ('dreb_pct', 'Def Rebound %', '% of available def rebounds', 72, 80, True),
+            ('reb_pct', 'Total Rebound %', 'Overall rebounding rate', 48, 54, True),
+            ('opp_fg3_pct', 'Opp 3P%', 'Opponent 3-point % allowed', 0.33, 0.40, False),
+            ('pf_per_game', 'Fouls/Game', 'Personal fouls per game', 18, 24, False),
+        ]
+        
+        for key, name, desc, low, high, higher_good in stat_info:
+            value = stats.get(key, 'N/A')
+            
+            if value != 'N/A':
+                # Format value
+                if isinstance(value, float):
+                    if value < 1:  # Percentages
+                        display_val = f"{value:.1%}"
+                    elif value > 50:  # Ratings
+                        display_val = f"{value:.1f}"
+                    else:
+                        display_val = f"{value:.2f}"
+                else:
+                    display_val = str(value)
+                
+                # Determine if good/average/poor
+                if higher_good is not None:
+                    mid = (low + high) / 2
+                    if higher_good:
+                        if value > mid + (high - mid) * 0.3:
+                            tag = 'good'
+                        elif value < mid - (mid - low) * 0.3:
+                            tag = 'poor'
+                        else:
+                            tag = 'average'
+                    else:
+                        if value < mid - (mid - low) * 0.3:
+                            tag = 'good'
+                        elif value > mid + (high - mid) * 0.3:
+                            tag = 'poor'
+                        else:
+                            tag = 'average'
+                else:
+                    tag = 'average'
+                
+                typical = f"{low} - {high}" if isinstance(low, int) else f"{low:.0%} - {high:.0%}"
+            else:
+                display_val = 'N/A'
+                tag = 'average'
+                typical = 'N/A'
+            
+            self.stats_tree.insert(
+                '', 'end',
+                values=(name, display_val, desc, typical),
+                tags=(tag,)
+            )
         
     def log(self, message: str):
         """Add a message to the log."""
@@ -333,7 +471,10 @@ class NBAPredictor(tk.Tk):
             self.inj_tree.delete(item)
         for item in self.factors_tree.get_children():
             self.factors_tree.delete(item)
+        for item in self.stats_tree.get_children():
+            self.stats_tree.delete(item)
         self.game_selector['values'] = []
+        self.team_selector['values'] = []
         self.log_text.delete(1.0, tk.END)
         
         # Run in background thread
@@ -362,9 +503,22 @@ class NBAPredictor(tk.Tk):
             self.log(f"Season: {season}")
             
             team_stats = get_advanced_team_stats(season=season)
+            self.team_stats = team_stats  # Store for display
             
             if team_stats:
                 self.log(f"Loaded stats for {len(team_stats)} teams.")
+                # Log sample stats for verification
+                teams_playing = list(set(
+                    [g.away_team for g in games] + [g.home_team for g in games]
+                ))
+                self.log("\nTeam stats for today's games:")
+                for team in sorted(teams_playing):
+                    if team in team_stats:
+                        s = team_stats[team]
+                        self.log(f"  {team}: NetRtg={s.get('net_rating', 0):+.1f}, "
+                                f"OffRtg={s.get('off_rating', 0):.1f}, "
+                                f"DefRtg={s.get('def_rating', 0):.1f}, "
+                                f"Pace={s.get('pace', 0):.1f}")
             else:
                 self.log("Warning: Could not load team stats. Using defaults.")
             
@@ -376,7 +530,11 @@ class NBAPredictor(tk.Tk):
             
             try:
                 rest_days = get_team_rest_days(teams_playing, season=season)
-                self.log(f"Calculated rest days for {len(rest_days)} teams.")
+                self.log(f"Calculated rest days for {len(rest_days)} teams:")
+                for team in sorted(teams_playing):
+                    days = rest_days.get(team, 1)
+                    status = "B2B" if days == 0 else f"{days} day(s) rest"
+                    self.log(f"  {team}: {status}")
             except Exception as e:
                 self.log(f"Could not get rest days: {e}")
                 rest_days = {t: 1 for t in teams_playing}
@@ -474,6 +632,15 @@ class NBAPredictor(tk.Tk):
         if game_options:
             self.game_selector.current(0)
             self.on_game_selected(None)
+        
+        # Update team selector for stats tab
+        teams_playing = sorted(list(set(
+            [s.away_team for s in self.scores] + [s.home_team for s in self.scores]
+        )))
+        self.team_selector['values'] = teams_playing
+        if teams_playing:
+            self.team_selector.current(0)
+            self.on_team_selected(None)
         
         # Update injuries tree
         for injury in self.injuries:
