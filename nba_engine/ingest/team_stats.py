@@ -110,10 +110,15 @@ def get_comprehensive_team_stats(
     # 1. Get overall season stats
     overall = _fetch_team_stats(season, location=None, timeout=timeout)
     
-    # 2. Get home stats
+    # If API failed, use fallback data
+    if not overall:
+        print("  API failed, using fallback team data...")
+        return get_fallback_team_strength()
+    
+    # 2. Get home stats (optional - don't fail if this doesn't work)
     home_stats = _fetch_team_stats(season, location="Home", timeout=timeout)
     
-    # 3. Get road stats
+    # 3. Get road stats (optional)
     road_stats = _fetch_team_stats(season, location="Road", timeout=timeout)
     
     # Combine into TeamStrength objects
@@ -151,6 +156,11 @@ def get_comprehensive_team_stats(
         ts.blended_net_rating = ts.net_rating
         
         teams[abbrev] = ts
+    
+    # If we still got 0 teams somehow, use fallback
+    if not teams:
+        print("  No teams loaded, using fallback data...")
+        return get_fallback_team_strength()
     
     print(f"  Loaded stats for {len(teams)} teams.")
     return teams

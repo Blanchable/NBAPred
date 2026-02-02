@@ -322,7 +322,12 @@ class NBAPredictor(tk.Tk):
             
             try:
                 team_strength = get_comprehensive_team_stats(season=season)
-            except:
+                if not team_strength:
+                    self.log("  API returned empty, using fallback...")
+                    team_strength = get_fallback_team_strength()
+            except Exception as e:
+                self.log(f"  API error: {e}")
+                self.log("  Using fallback team data...")
                 team_strength = get_fallback_team_strength()
             
             self.team_stats = {k: v.to_dict() if hasattr(v, 'to_dict') else v for k, v in team_strength.items()}

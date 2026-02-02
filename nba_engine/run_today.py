@@ -150,13 +150,15 @@ def main() -> int:
     print("[2/7] Loading team statistics (with home/road splits)...")
     try:
         team_strength = get_comprehensive_team_stats(season=season)
+        if not team_strength:
+            print("  API returned empty, using fallback data...")
+            team_strength = get_fallback_team_strength()
     except Exception as e:
         print(f"  Error: {e}")
         print("  Using fallback team data...")
         team_strength = get_fallback_team_strength()
     
-    if team_strength:
-        print(f"  Loaded stats for {len(team_strength)} teams.")
+    print(f"  Loaded stats for {len(team_strength)} teams.")
     print()
     
     # Step 3: Load player stats
