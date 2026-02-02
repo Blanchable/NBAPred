@@ -4,3 +4,4 @@ pdfplumber
 pandas
 python-dateutil
 tqdm
+pyinstaller

@@ -6,14 +6,30 @@ A fully automated pregame NBA prediction engine that runs locally and generates 
 
 ## Features
 
+- **One-Click GUI Application**: Beautiful graphical interface - just click a button to get predictions
 - **Automated Slate Fetching**: Automatically retrieves today's NBA games from the official NBA API
 - **Injury Report Integration**: Downloads and parses the latest official NBA injury report PDF
 - **Simple Prediction Model**: Uses team net ratings (per 100 possessions) with home court adjustment
 - **CSV Outputs**: Saves predictions and injuries to timestamped CSV files
+- **Standalone Executable**: Can be built into a `.exe` file that runs without Python installed
+
+## GUI Features
+
+The graphical application (`app.py`) includes:
+
+- **Predictions Tab**: View all games with projected margins and win probabilities
+- **Injuries Tab**: Color-coded injury list (Out=red, Doubtful=orange, Questionable=yellow, Probable=green)
+- **Log Tab**: See detailed progress and any errors
+- **Save Button**: Export results to CSV with one click
+- **Auto-Setup**: The launcher scripts will automatically set up the environment on first run
 
 ## Quick Start
 
-### Windows PowerShell
+### Option 1: GUI Application (Recommended)
+
+The easiest way to use the prediction engine is with the graphical interface.
+
+#### Windows PowerShell
 
 ```powershell
 # 1. Create virtual environment
@@ -28,11 +44,11 @@ pip install --upgrade pip
 # 4. Install dependencies
 pip install -r requirements.txt
 
-# 5. Run the engine
-python run_today.py
+# 5. Run the GUI app
+python app.py
 ```
 
-### Linux/macOS
+#### Linux/macOS
 
 ```bash
 # 1. Create virtual environment
@@ -47,8 +63,42 @@ pip install --upgrade pip
 # 4. Install dependencies
 pip install -r requirements.txt
 
-# 5. Run the engine
+# 5. Run the GUI app
+python app.py
+```
+
+### Option 2: Build Standalone Executable (No Python Required)
+
+Create a `.exe` file that you can double-click to run without needing Python installed.
+
+#### Windows PowerShell
+
+```powershell
+# After installing dependencies (steps 1-4 above), run:
+pyinstaller --onefile --windowed --name "NBA_Predictor" --add-data "ingest;ingest" --add-data "model;model" app.py
+```
+
+The executable will be created at `dist/NBA_Predictor.exe`. You can copy this file anywhere and double-click to run!
+
+#### Linux/macOS
+
+```bash
+# After installing dependencies (steps 1-4 above), run:
+pyinstaller --onefile --windowed --name "NBA_Predictor" --add-data "ingest:ingest" --add-data "model:model" app.py
+```
+
+The executable will be created at `dist/NBA_Predictor`.
+
+### Option 3: Command Line (Original)
+
+For automation or scripting, use the command-line interface:
+
+```powershell
+# Windows
 python run_today.py
+
+# Linux/macOS
+python3 run_today.py
 ```
 
 ## Project Structure
@@ -63,10 +113,19 @@ nba_engine/
 │   ├── __init__.py
 │   └── pregame.py       # Prediction model (net rating + home court)
 ├── outputs/             # Generated CSV and PDF files
-├── run_today.py         # Main entry point
+├── app.py               # GUI application (recommended)
+├── run_today.py         # Command-line interface
+├── run_app.bat          # Windows launcher (double-click to run)
+├── run_app.sh           # Linux/macOS launcher
 ├── requirements.txt     # Python dependencies
 └── README.md
 ```
+
+## Easy Launch (After First Setup)
+
+**Windows**: Double-click `run_app.bat`
+
+**Linux/macOS**: Double-click `run_app.sh` (or run `./run_app.sh` in terminal)
 
 ## Output Files
 
