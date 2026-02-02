@@ -305,14 +305,24 @@ class NBAPredictor(tk.Tk):
         try:
             # 1. Get games
             self.log("Fetching today's NBA games...")
-            games = get_todays_games()
+            games, api_date, is_current_date = get_todays_games()
             
             if not games:
-                self.log("No games found for today.")
+                self.log("No games found.")
+                if not is_current_date:
+                    self.log("⚠ API may not have updated yet. Try after 10 AM ET.")
                 self.after(0, self.fetch_complete, False, "No games scheduled")
                 return
             
-            self.log(f"Found {len(games)} games")
+            self.log(f"Found {len(games)} games for {api_date}")
+            
+            if not is_current_date:
+                self.log("")
+                self.log("⚠ WARNING: These may be YESTERDAY'S games!")
+                self.log(f"  API Date: {api_date}")
+                self.log("  NBA API typically updates around 6-10 AM ET.")
+                self.log("")
+            
             for g in games:
                 self.log(f"  {g.away_team} @ {g.home_team}")
             

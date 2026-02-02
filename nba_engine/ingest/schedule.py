@@ -5,8 +5,8 @@ Uses nba_api to fetch today's game slate from live scoreboard.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
 import time
 
 from nba_api.live.nba.endpoints import scoreboard
@@ -21,18 +21,49 @@ class Game:
     start_time_utc: Optional[str] = None
 
 
-def get_todays_games(max_retries: int = 3, retry_delay: float = 2.0) -> list[Game]:
+def get_eastern_date() -> str:
+    """
+    Get today's date in Eastern Time (what NBA uses).
+    
+    Returns:
+        Date string in YYYY-MM-DD format.
+    """
+    from datetime import timezone
+    
+    # UTC now
+    utc_now = datetime.now(timezone.utc)
+    
+    # Approximate Eastern Time (UTC-5 in winter, UTC-4 in summer)
+    # Simple DST check: March-November is EDT (UTC-4), else EST (UTC-5)
+    month = utc_now.month
+    if 3 <= month <= 11:
+        offset = -4  # EDT
+    else:
+        offset = -5  # EST
+    
+    eastern_now = utc_now + timedelta(hours=offset)
+    return eastern_now.strftime("%Y-%m-%d")
+
+
+def get_todays_games(
+    max_retries: int = 3, 
+    retry_delay: float = 2.0,
+    require_current_date: bool = True,
+) -> Tuple[list[Game], str, bool]:
     """
     Fetch today's NBA games from the live scoreboard.
     
     Args:
         max_retries: Maximum number of retry attempts on failure.
         retry_delay: Delay between retries in seconds.
+        require_current_date: If True, validates that API date matches today.
     
     Returns:
-        List of Game objects for today's slate.
+        Tuple of (games_list, api_date, is_current_date)
     """
     games = []
+    api_date = "Unknown"
+    is_current = False
     
     for attempt in range(max_retries):
         try:
@@ -40,10 +71,23 @@ def get_todays_games(max_retries: int = 3, retry_delay: float = 2.0) -> list[Gam
             data = sb.get_dict()
             
             scoreboard_data = data.get("scoreboard", {})
-            game_date = scoreboard_data.get("gameDate", "Unknown")
+            api_date = scoreboard_data.get("gameDate", "Unknown")
             game_list = scoreboard_data.get("games", [])
             
-            print(f"  NBA API game date: {game_date}")
+            # Check if API date matches today (Eastern Time)
+            expected_date = get_eastern_date()
+            is_current = (api_date == expected_date)
+            
+            print(f"  NBA API game date: {api_date}")
+            print(f"  Expected date (ET): {expected_date}")
+            
+            if is_current:
+                print(f"  ✓ Date matches - showing today's games")
+            else:
+                print(f"  ⚠ DATE MISMATCH - API is showing {api_date}, not {expected_date}")
+                print(f"    This usually means:")
+                print(f"    - It's early morning and the API hasn't updated yet")
+                print(f"    - Try again after 10 AM Eastern Time")
             
             for game_data in game_list:
                 game = Game(
@@ -54,7 +98,7 @@ def get_todays_games(max_retries: int = 3, retry_delay: float = 2.0) -> list[Gam
                 )
                 games.append(game)
             
-            return games
+            return games, api_date, is_current
             
         except Exception as e:
             if attempt < max_retries - 1:
@@ -62,9 +106,9 @@ def get_todays_games(max_retries: int = 3, retry_delay: float = 2.0) -> list[Gam
                 time.sleep(retry_delay)
             else:
                 print(f"  Failed to fetch games after {max_retries} attempts: {e}")
-                return []
+                return [], api_date, False
     
-    return games
+    return games, api_date, is_current
 
 
 def get_current_season() -> str:

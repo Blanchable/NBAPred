@@ -132,18 +132,29 @@ def main() -> int:
     
     # Step 1: Fetch today's slate
     print("[1/7] Pulling today's slate...")
-    games = get_todays_games()
+    games, api_date, is_current_date = get_todays_games()
     
     if not games:
-        print("  No games found for today.")
+        print("  No games found.")
+        if not is_current_date:
+            print("  ⚠ The API may not have updated to today's games yet.")
+            print("    Try again after 10 AM Eastern Time.")
         print("=" * 70)
         print("Run complete - no games to predict.")
         print("=" * 70)
         return 0
     
-    print(f"  Found {len(games)} game(s):")
+    print(f"  Found {len(games)} game(s) for {api_date}:")
     for game in games:
         print(f"    {game.away_team} @ {game.home_team}")
+    
+    if not is_current_date:
+        print()
+        print("  " + "=" * 50)
+        print("  ⚠ WARNING: These may be YESTERDAY'S games!")
+        print(f"    API Date: {api_date}")
+        print("    The NBA API typically updates around 6-10 AM ET.")
+        print("  " + "=" * 50)
     print()
     
     # Step 2: Load comprehensive team stats

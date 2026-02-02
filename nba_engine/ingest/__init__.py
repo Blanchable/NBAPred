@@ -3,6 +3,7 @@
 from .schedule import (
     get_todays_games,
     get_current_season,
+    get_eastern_date,
     Game,
 )
 from .team_stats import (
