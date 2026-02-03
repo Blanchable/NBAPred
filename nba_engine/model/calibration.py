@@ -26,11 +26,16 @@ class PredictionRecord:
     home_win_prob: float
     away_win_prob: float
     predicted_winner: str
-    confidence: str
+    confidence: float  # Confidence as 0.0-1.0
     projected_margin: float
     actual_winner: str = ""  # Filled in later
     actual_margin: float = 0.0  # Filled in later
     correct: Optional[bool] = None
+    
+    @property
+    def confidence_pct(self) -> str:
+        """Get confidence as percentage string."""
+        return f"{self.confidence * 100:.0f}%"
 
 
 class PredictionLogger:

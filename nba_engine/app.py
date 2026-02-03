@@ -412,11 +412,8 @@ class NBAPredictor(tk.Tk):
                 )
                 self.scores.append(score)
             
-            # Sort by confidence
-            self.scores.sort(key=lambda s: (
-                {'high': 3, 'medium': 2, 'low': 1}.get(s.confidence, 0),
-                abs(s.edge_score_total)
-            ), reverse=True)
+            # Sort by confidence (highest first)
+            self.scores.sort(key=lambda s: (s.confidence, abs(s.edge_score_total)), reverse=True)
             
             self.log(f"Generated {len(self.scores)} predictions")
             
@@ -436,10 +433,11 @@ class NBAPredictor(tk.Tk):
             matchup = f"{score.away_team} @ {score.home_team}"
             power = f"{score.away_power_rating:.0f} v {score.home_power_rating:.0f}"
             
-            tag = f"{score.confidence}_conf"
+            # Use confidence label for tag coloring
+            tag = f"{score.confidence_label.lower()}_conf"
             
             self.pred_tree.insert('', 'end', values=(
-                matchup, score.predicted_winner, score.confidence.upper()[:3],
+                matchup, score.predicted_winner, score.confidence_pct,
                 power, f"{score.edge_score_total:+.1f}",
                 f"{score.home_win_prob:.1%}", f"{score.away_win_prob:.1%}",
                 f"{score.projected_margin_home:+.1f}", score.top_5_factors_str

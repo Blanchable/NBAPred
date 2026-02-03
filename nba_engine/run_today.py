@@ -374,11 +374,8 @@ def main() -> int:
         )
         prediction_records.append(record)
     
-    # Sort by confidence and edge
-    scores.sort(key=lambda s: (
-        {'high': 3, 'medium': 2, 'low': 1}.get(s.confidence, 0),
-        abs(s.edge_score_total)
-    ), reverse=True)
+    # Sort by confidence (highest first), then by edge magnitude
+    scores.sort(key=lambda s: (s.confidence, abs(s.edge_score_total)), reverse=True)
     
     print(f"  Generated {len(scores)} predictions.")
     print()
@@ -401,7 +398,7 @@ def main() -> int:
             if debug.get('team') == score.away_team and debug.get('impact_rank') == 1:
                 pass
         
-        print(f"{matchup:<18} {score.predicted_winner:<6} {score.confidence:<6} "
+        print(f"{matchup:<18} {score.predicted_winner:<6} {score.confidence:>5.0%} "
               f"{score.edge_score_total:>+7.1f} {score.home_win_prob:>6.1%} "
               f"{score.away_win_prob:>6.1%} {score.projected_margin_home:>+7.1f}")
     

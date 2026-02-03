@@ -133,10 +133,25 @@ class GameScore:
     away_win_prob: float
     projected_margin_home: float
     predicted_winner: str
-    confidence: str  # "high", "medium", "low"
+    confidence: float  # 0.0-1.0 confidence percentage
     home_power_rating: float = 0.0  # Team power rating (0-100)
     away_power_rating: float = 0.0
     factors: list[FactorResult] = field(default_factory=list)
+    
+    @property
+    def confidence_pct(self) -> str:
+        """Get confidence as percentage string."""
+        return f"{self.confidence * 100:.0f}%"
+    
+    @property
+    def confidence_label(self) -> str:
+        """Get confidence category label (for UI tagging)."""
+        if self.confidence >= 0.70:
+            return "high"
+        elif self.confidence >= 0.40:
+            return "medium"
+        else:
+            return "low"
     
     @property
     def top_5_factors_str(self) -> str:
@@ -737,7 +752,7 @@ def score_game_v3(
     else:
         predicted_winner = away_team
     
-    # Calculate confidence level
+    # Calculate confidence level (0.0 - 1.0 scale)
     home_vol = safe_get(home_stats, 'volatility_score', 0.5)
     away_vol = safe_get(away_stats, 'volatility_score', 0.5)
     avg_volatility = (home_vol + away_vol) / 2
@@ -745,18 +760,18 @@ def score_game_v3(
     injury_penalty = home_confidence_penalty + away_confidence_penalty
     edge_magnitude = abs(edge_score_total)
     
-    confidence_score = (
+    # Confidence based on:
+    # - Lower injury uncertainty (30%)
+    # - Lower team volatility (30%)
+    # - Higher edge magnitude (40%)
+    confidence = (
         0.3 * (1 - min(1, injury_penalty))
         + 0.3 * (1 - avg_volatility)
         + 0.4 * min(1, edge_magnitude / 15)
     )
     
-    if confidence_score >= 0.65:
-        confidence = "high"
-    elif confidence_score >= 0.40:
-        confidence = "medium"
-    else:
-        confidence = "low"
+    # Clamp to reasonable range
+    confidence = max(0.15, min(0.95, confidence))
     
     # Calculate power ratings
     home_power = calculate_power_rating(home_adj_net, home_availability)
