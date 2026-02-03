@@ -403,13 +403,32 @@ def _parse_injury_line(line: str, current_team: str) -> Optional[InjuryRow]:
         InjuryRow if successfully parsed, None otherwise.
     """
     # Skip header lines and non-data lines
-    skip_patterns = [
-        "game date", "game time", "matchup", "note:", "injury report",
-        "page", "team", "player name", "current status", "reason",
-        "not yet submitted", "nba official"
+    # Be careful not to match actual injury reasons like "Personal Reasons"
+    lower_line = line.lower().strip()
+    
+    # Skip exact header matches or lines starting with header text
+    header_patterns = [
+        "game date",
+        "game time", 
+        "matchup",
+        "injury report",
+        "nba official",
     ]
-    lower_line = line.lower()
-    if any(skip in lower_line for skip in skip_patterns):
+    if any(lower_line.startswith(p) for p in header_patterns):
+        return None
+    
+    # Skip lines that are just notes or page markers
+    if lower_line.startswith("note:") or lower_line.startswith("page"):
+        return None
+    
+    # Skip "NOT YET SUBMITTED" lines (these are team placeholders)
+    if "not yet submitted" in lower_line:
+        return None
+    
+    # Skip header row with column names (very specific match)
+    if lower_line == "team player name current status reason":
+        return None
+    if "playername" in lower_line.replace(" ", "") and "currentstatus" in lower_line.replace(" ", ""):
         return None
     
     # Skip lines that are just game info (date/time + matchup only)
