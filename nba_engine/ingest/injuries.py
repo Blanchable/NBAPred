@@ -100,6 +100,27 @@ class InjuryRow:
     player: str
     status: str
     reason: str
+    
+    @property
+    def player_normalized(self) -> str:
+        """Get normalized player name for matching."""
+        from .availability import normalize_player_name
+        return normalize_player_name(self.player)
+    
+    def get_canonical_status(self):
+        """Get canonical availability status."""
+        from .availability import normalize_availability
+        return normalize_availability(self.status, self.reason)
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for CSV output."""
+        return {
+            'team': self.team,
+            'player': self.player,
+            'status': self.status,
+            'reason': self.reason,
+            'canonical_status': self.get_canonical_status().value,
+        }
 
 
 def _get_eastern_time_offset() -> int:

@@ -34,6 +34,14 @@ class PlayerImpact:
     usage_pct: float  # If available
     impact_score: float  # Calculated: MPG * PPM
     is_key_player: bool  # Top 6 by impact on team
+    impact_rank: int = 0  # 1 = top player, 2 = second, etc.
+    is_star: bool = False  # Top 2 player on team
+    
+    @property
+    def player_name_normalized(self) -> str:
+        """Get normalized player name for matching."""
+        from .availability import normalize_player_name
+        return normalize_player_name(self.player_name)
 
 
 def get_player_stats(
@@ -93,11 +101,15 @@ def get_player_stats(
                     team_players[team_abbrev] = []
                 team_players[team_abbrev].append(player)
             
-            # Mark top 6 players by impact as key players
+            # Mark top 6 players by impact as key players, top 2 as stars
             for team, players in team_players.items():
                 players.sort(key=lambda p: p.impact_score, reverse=True)
-                for i, player in enumerate(players[:6]):
-                    player.is_key_player = True
+                for i, player in enumerate(players):
+                    player.impact_rank = i + 1
+                    if i < 6:
+                        player.is_key_player = True
+                    if i < 2:
+                        player.is_star = True
             
             print(f"  Loaded player stats for {len(team_players)} teams.")
             return team_players
@@ -137,6 +149,8 @@ def get_fallback_player_stats() -> dict[str, list[PlayerImpact]]:
                 usage_pct=25 - i * 2,
                 impact_score=impact,
                 is_key_player=True,
+                impact_rank=i + 1,
+                is_star=(i < 2),  # Top 2 are stars
             ))
         team_players[team] = players
     

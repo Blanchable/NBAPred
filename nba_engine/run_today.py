@@ -25,16 +25,19 @@ from ingest.team_stats import (
     get_team_rest_days,
     get_fallback_team_strength,
 )
-from ingest.player_stats import get_player_stats, calculate_team_availability
+from ingest.player_stats import get_player_stats, get_fallback_player_stats
 from ingest.injuries import (
     find_latest_injury_pdf,
     download_injury_pdf,
     parse_injury_pdf,
     InjuryRow,
 )
+from ingest.inactives import fetch_all_game_inactives, merge_inactives_with_injuries
+from ingest.availability import AvailabilityConfidence
 from model.lineup_adjustment import (
     calculate_lineup_adjusted_strength,
     calculate_game_confidence,
+    get_availability_debug_rows,
 )
 from model.point_system import score_game_v3, validate_system, GameScore
 from model.calibration import PredictionLogger, PredictionRecord
@@ -103,8 +106,24 @@ def save_injuries_csv(injuries: list[InjuryRow], timestamp: str) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"injuries_{timestamp}.csv"
     
-    data = [{"team": i.team, "player": i.player, "status": i.status, "reason": i.reason} for i in injuries]
+    data = []
+    for i in injuries:
+        row = i.to_dict() if hasattr(i, 'to_dict') else {
+            "team": i.team, "player": i.player, "status": i.status, "reason": i.reason
+        }
+        data.append(row)
+    
     df = pd.DataFrame(data)
+    df.to_csv(output_path, index=False)
+    return output_path
+
+
+def save_availability_debug_csv(debug_rows: list[dict], timestamp: str) -> Path:
+    """Save availability debug info to CSV file."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / f"availability_debug_{timestamp}.csv"
+    
+    df = pd.DataFrame(debug_rows)
     df.to_csv(output_path, index=False)
     return output_path
 
@@ -176,9 +195,13 @@ def main() -> int:
     print("[3/7] Loading player statistics...")
     try:
         player_stats = get_player_stats(season=season)
+        if not player_stats:
+            print("  API returned empty, using fallback data...")
+            player_stats = get_fallback_player_stats()
     except Exception as e:
         print(f"  Error: {e}")
-        player_stats = {}
+        print("  Using fallback player data...")
+        player_stats = get_fallback_player_stats()
     
     if player_stats:
         print(f"  Loaded players for {len(player_stats)} teams.")
@@ -204,6 +227,7 @@ def main() -> int:
     cache_file = OUTPUT_DIR / "latest_injury_url.txt"
     injury_url = find_latest_injury_pdf(cache_file=cache_file)
     injuries = []
+    injury_report_available = False
     
     if injury_url:
         print(f"  Found: {injury_url}")
@@ -212,23 +236,43 @@ def main() -> int:
         
         if pdf_bytes:
             injuries = parse_injury_pdf(pdf_bytes)
+            injury_report_available = len(injuries) > 0
             print(f"  Parsed {len(injuries)} injury entries.")
             
-            # Show key injuries
+            # Show key injuries with canonical status
             key_statuses = ["Out", "Doubtful"]
             key_injuries = [i for i in injuries if i.status in key_statuses]
             if key_injuries:
                 print("  Key injuries (Out/Doubtful):")
                 for inj in key_injuries[:10]:
-                    print(f"    {inj.team}: {inj.player} ({inj.status})")
+                    canonical = inj.get_canonical_status().value
+                    print(f"    {inj.team}: {inj.player} ({inj.status} -> {canonical}) - {inj.reason[:30]}")
     else:
         print("  No injury report found.")
+        print("  ⚠ Availability confidence will be LOW without injury data.")
+    print()
+    
+    # Step 5b: Fetch inactives from game feeds
+    print("[5b/7] Fetching game inactives (supplemental)...")
+    game_ids = [g.game_id for g in games if g.game_id]
+    inactives = {}
+    
+    if game_ids:
+        inactives = fetch_all_game_inactives(game_ids)
+        
+        # Merge inactives with injuries (inactives take priority)
+        if inactives:
+            injuries = merge_inactives_with_injuries(injuries, inactives)
+            print(f"  Merged inactives with injury report.")
+    else:
+        print("  No game IDs available for inactive fetch.")
     print()
     
     # Step 6: Generate lineup-adjusted predictions
     print("[6/7] Generating lineup-adjusted predictions...")
     scores = []
     prediction_records = []
+    all_availability_debug = []
     
     for game in games:
         # Get team strengths
@@ -243,13 +287,15 @@ def main() -> int:
         home_players = player_stats.get(game.home_team, [])
         away_players = player_stats.get(game.away_team, [])
         
-        # Calculate lineup-adjusted strengths
+        # Calculate lineup-adjusted strengths with star safeguards
         home_lineup = calculate_lineup_adjusted_strength(
             team=game.home_team,
             team_strength=home_ts,
             players=home_players,
             injuries=injuries,
             is_home=True,
+            inactives=inactives,
+            injury_report_available=injury_report_available,
         )
         
         away_lineup = calculate_lineup_adjusted_strength(
@@ -258,7 +304,13 @@ def main() -> int:
             players=away_players,
             injuries=injuries,
             is_home=False,
+            inactives=inactives,
+            injury_report_available=injury_report_available,
         )
+        
+        # Collect availability debug info
+        debug_rows = get_availability_debug_rows(home_lineup, away_lineup)
+        all_availability_debug.extend(debug_rows)
         
         # Get rest days
         home_rest = rest_days.get(game.home_team, 1)
@@ -305,18 +357,26 @@ def main() -> int:
     print()
     
     # Display predictions
-    print("=" * 80)
+    print("=" * 90)
     print("PREDICTIONS (sorted by confidence)")
-    print("=" * 80)
-    print(f"{'Matchup':<18} {'Pick':<6} {'Conf':<6} {'Edge':>7} {'Home%':>7} {'Away%':>7} {'Margin':>7} {'PWR':>10}")
-    print("-" * 80)
+    print("=" * 90)
+    print(f"{'Matchup':<18} {'Pick':<6} {'Conf':<6} {'Edge':>7} {'Home%':>7} {'Away%':>7} {'Margin':>7} {'Avail':>10}")
+    print("-" * 90)
     
     for score in scores:
         matchup = f"{score.away_team} @ {score.home_team}"
-        pwr = f"{score.away_power_rating:.0f} v {score.home_power_rating:.0f}"
+        # Find availability info from debug data
+        home_avail = "100%"
+        away_avail = "100%"
+        for debug in all_availability_debug:
+            if debug.get('team') == score.home_team and debug.get('impact_rank') == 1:
+                pass  # Will use lineup data
+            if debug.get('team') == score.away_team and debug.get('impact_rank') == 1:
+                pass
+        
         print(f"{matchup:<18} {score.predicted_winner:<6} {score.confidence:<6} "
               f"{score.edge_score_total:>+7.1f} {score.home_win_prob:>6.1%} "
-              f"{score.away_win_prob:>6.1%} {score.projected_margin_home:>+7.1f} {pwr:>10}")
+              f"{score.away_win_prob:>6.1%} {score.projected_margin_home:>+7.1f}")
     
     print("-" * 80)
     print()
@@ -342,6 +402,10 @@ def main() -> int:
     if injuries:
         inj_path = save_injuries_csv(injuries, timestamp)
         print(f"  Injuries: {inj_path}")
+    
+    if all_availability_debug:
+        avail_path = save_availability_debug_csv(all_availability_debug, timestamp)
+        print(f"  Availability Debug: {avail_path}")
     
     # Log predictions for calibration
     logger.log_predictions(prediction_records)
