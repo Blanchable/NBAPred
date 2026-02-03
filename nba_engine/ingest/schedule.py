@@ -50,19 +50,19 @@ def _fetch_from_static_schedule(target_date: str) -> list[Game]:
     Fetch games from NBA's static season schedule API.
     
     This is a fallback when the live scoreboard hasn't updated yet.
-    The schedule uses DD/MM/YYYY format for dates.
+    The schedule uses MM/DD/YYYY format for dates.
     
     Args:
-        target_date: Date in YYYY-MM-DD format (e.g., "2026-02-02")
+        target_date: Date in YYYY-MM-DD format (e.g., "2026-02-03")
         
     Returns:
         List of Game objects for the target date.
     """
     url = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
     
-    # Convert target_date (YYYY-MM-DD) to DD/MM/YYYY format
+    # Convert target_date (YYYY-MM-DD) to MM/DD/YYYY format (NBA's format)
     year, month, day = target_date.split("-")
-    target_formatted = f"{day}/{month}/{year}"
+    target_formatted = f"{month}/{day}/{year}"
     
     try:
         print(f"  Fetching from static schedule for {target_formatted}...")
