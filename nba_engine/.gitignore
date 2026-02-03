@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated outputs (keep folder, ignore contents)
+outputs/*.csv
+outputs/*.pdf
+outputs/*.txt
+!outputs/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
