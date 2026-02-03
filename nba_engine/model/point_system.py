@@ -133,10 +133,15 @@ class GameScore:
     away_win_prob: float
     projected_margin_home: float
     predicted_winner: str
-    confidence: float  # 0.0-1.0 confidence percentage
+    confidence: float  # Win probability of the chosen pick (0.0-1.0)
     home_power_rating: float = 0.0  # Team power rating (0-100)
     away_power_rating: float = 0.0
     factors: list[FactorResult] = field(default_factory=list)
+    
+    @property
+    def pick_prob(self) -> float:
+        """Get win probability of the predicted winner."""
+        return self.confidence  # confidence IS the pick probability now
     
     @property
     def confidence_pct(self) -> str:
@@ -145,10 +150,13 @@ class GameScore:
     
     @property
     def confidence_label(self) -> str:
-        """Get confidence category label (for UI tagging)."""
-        if self.confidence >= 0.70:
+        """
+        Get confidence category label (for UI tagging).
+        Based on win probability thresholds.
+        """
+        if self.confidence >= 0.65:
             return "high"
-        elif self.confidence >= 0.40:
+        elif self.confidence >= 0.55:
             return "medium"
         else:
             return "low"
@@ -169,6 +177,53 @@ class GameScore:
                 parts.append(f"{f.display_name}:{sign}{f.contribution:.1f}")
         
         return ", ".join(parts) if parts else "No factors"
+
+
+# ============================================================================
+# PICK DECISION LOGIC
+# ============================================================================
+
+# Edge tie threshold - below this, use probability as tie-breaker
+EDGE_TIE_THRESHOLD = 0.5
+
+
+def decide_pick(
+    edge_score_total: float,
+    home_team: str,
+    away_team: str,
+    home_win_prob: float,
+    away_win_prob: float,
+) -> tuple[str, float]:
+    """
+    Decide the predicted winner based on EDGE, not probability.
+    
+    PICK is determined by edge_score_total sign:
+    - Positive edge -> Home team
+    - Negative edge -> Away team
+    - Near-zero edge -> Use probability as tie-breaker
+    
+    Args:
+        edge_score_total: The edge score (positive = home advantage)
+        home_team: Home team abbreviation
+        away_team: Away team abbreviation
+        home_win_prob: Model's home win probability
+        away_win_prob: Model's away win probability
+    
+    Returns:
+        Tuple of (predicted_winner, pick_probability)
+    """
+    if edge_score_total > EDGE_TIE_THRESHOLD:
+        # Edge favors home team
+        return home_team, home_win_prob
+    elif edge_score_total < -EDGE_TIE_THRESHOLD:
+        # Edge favors away team
+        return away_team, away_win_prob
+    else:
+        # Edge is in tie range - use probability as tie-breaker
+        if home_win_prob >= away_win_prob:
+            return home_team, home_win_prob
+        else:
+            return away_team, away_win_prob
 
 
 # ============================================================================
@@ -746,32 +801,15 @@ def score_game_v3(
     if abs(projected_margin) < 6 and home_win_prob > 0.85:
         print(f"  Warning: margin={projected_margin:.1f} but prob={home_win_prob:.1%} - check calibration")
     
-    # Determine predicted winner
-    if home_win_prob > 0.5:
-        predicted_winner = home_team
-    else:
-        predicted_winner = away_team
-    
-    # Calculate confidence level (0.0 - 1.0 scale)
-    home_vol = safe_get(home_stats, 'volatility_score', 0.5)
-    away_vol = safe_get(away_stats, 'volatility_score', 0.5)
-    avg_volatility = (home_vol + away_vol) / 2
-    
-    injury_penalty = home_confidence_penalty + away_confidence_penalty
-    edge_magnitude = abs(edge_score_total)
-    
-    # Confidence based on:
-    # - Lower injury uncertainty (30%)
-    # - Lower team volatility (30%)
-    # - Higher edge magnitude (40%)
-    confidence = (
-        0.3 * (1 - min(1, injury_penalty))
-        + 0.3 * (1 - avg_volatility)
-        + 0.4 * min(1, edge_magnitude / 15)
+    # Determine predicted winner using EDGE (not probability!)
+    # Confidence is the win probability of the chosen pick
+    predicted_winner, confidence = decide_pick(
+        edge_score_total=edge_score_total,
+        home_team=home_team,
+        away_team=away_team,
+        home_win_prob=home_win_prob,
+        away_win_prob=away_win_prob,
     )
-    
-    # Clamp to reasonable range
-    confidence = max(0.15, min(0.95, confidence))
     
     # Calculate power ratings
     home_power = calculate_power_rating(home_adj_net, home_availability)

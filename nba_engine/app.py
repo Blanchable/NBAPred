@@ -412,8 +412,8 @@ class NBAPredictor(tk.Tk):
                 )
                 self.scores.append(score)
             
-            # Sort by confidence (highest first)
-            self.scores.sort(key=lambda s: (s.confidence, abs(s.edge_score_total)), reverse=True)
+            # Sort by abs(edge_score_total) (strongest edge first), then by confidence
+            self.scores.sort(key=lambda s: (abs(s.edge_score_total), s.confidence), reverse=True)
             
             self.log(f"Generated {len(self.scores)} predictions")
             

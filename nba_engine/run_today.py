@@ -374,8 +374,8 @@ def main() -> int:
         )
         prediction_records.append(record)
     
-    # Sort by confidence (highest first), then by edge magnitude
-    scores.sort(key=lambda s: (s.confidence, abs(s.edge_score_total)), reverse=True)
+    # Sort by abs(edge_score_total) (strongest edge first), then by confidence (pick probability)
+    scores.sort(key=lambda s: (abs(s.edge_score_total), s.confidence), reverse=True)
     
     print(f"  Generated {len(scores)} predictions.")
     print()
