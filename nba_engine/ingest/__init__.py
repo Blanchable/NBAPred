@@ -41,6 +41,19 @@ from .inactives import (
     is_player_inactive,
     InactivePlayer,
 )
+from .known_absences import (
+    load_known_absences,
+    save_known_absence,
+    merge_known_absences_with_injuries,
+    create_sample_absences_file,
+    KnownAbsence,
+)
+from .news_absences import (
+    fetch_espn_injuries,
+    fetch_all_news_absences,
+    merge_news_absences_with_injuries,
+    NewsAbsence,
+)
 
 __all__ = [
     # Schedule
@@ -78,4 +91,15 @@ __all__ = [
     "merge_inactives_with_injuries",
     "is_player_inactive",
     "InactivePlayer",
+    # Known absences (manual)
+    "load_known_absences",
+    "save_known_absence",
+    "merge_known_absences_with_injuries",
+    "create_sample_absences_file",
+    "KnownAbsence",
+    # News absences
+    "fetch_espn_injuries",
+    "fetch_all_news_absences",
+    "merge_news_absences_with_injuries",
+    "NewsAbsence",
 ]

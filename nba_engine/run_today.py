@@ -33,7 +33,9 @@ from ingest.injuries import (
     InjuryRow,
 )
 from ingest.inactives import fetch_all_game_inactives, merge_inactives_with_injuries
-from ingest.availability import AvailabilityConfidence
+from ingest.known_absences import load_known_absences, merge_known_absences_with_injuries
+from ingest.news_absences import fetch_all_news_absences, merge_news_absences_with_injuries
+from ingest.availability import AvailabilityConfidence, normalize_player_name
 from model.lineup_adjustment import (
     calculate_lineup_adjusted_strength,
     calculate_game_confidence,
@@ -252,8 +254,33 @@ def main() -> int:
         print("  ⚠ Availability confidence will be LOW without injury data.")
     print()
     
-    # Step 5b: Fetch inactives from game feeds
-    print("[5b/7] Fetching game inactives (supplemental)...")
+    # Step 5b: Load known absences (manual overrides)
+    print("[5b/8] Loading known absences (manual overrides)...")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    known_absences = load_known_absences(check_date=today_str)
+    
+    if known_absences:
+        print(f"  Found {len(known_absences)} known absence(s):")
+        for absence in known_absences:
+            print(f"    {absence.team}: {absence.player} ({absence.reason})")
+        
+        injuries = merge_known_absences_with_injuries(injuries, known_absences)
+    else:
+        print("  No manual absences configured.")
+        print("  Tip: Add to data/known_absences.csv for players out for personal reasons, etc.")
+    print()
+    
+    # Step 5c: Fetch ESPN injury data (supplemental)
+    print("[5c/8] Fetching ESPN injury data (supplemental)...")
+    teams_playing = list(set([g.away_team for g in games] + [g.home_team for g in games]))
+    news_absences = fetch_all_news_absences(teams_playing)
+    
+    if news_absences:
+        injuries = merge_news_absences_with_injuries(injuries, news_absences)
+    print()
+    
+    # Step 5d: Fetch inactives from game feeds
+    print("[5d/8] Fetching game inactives (pregame rosters)...")
     game_ids = [g.game_id for g in games if g.game_id]
     inactives = {}
     
@@ -269,7 +296,7 @@ def main() -> int:
     print()
     
     # Step 6: Generate lineup-adjusted predictions
-    print("[6/7] Generating lineup-adjusted predictions...")
+    print("[6/8] Generating lineup-adjusted predictions...")
     scores = []
     prediction_records = []
     all_availability_debug = []
@@ -378,20 +405,37 @@ def main() -> int:
               f"{score.edge_score_total:>+7.1f} {score.home_win_prob:>6.1%} "
               f"{score.away_win_prob:>6.1%} {score.projected_margin_home:>+7.1f}")
     
-    print("-" * 80)
+    print("-" * 90)
     print()
+    
+    # Show star player alerts for unconfirmed stars
+    unconfirmed_stars = []
+    for debug in all_availability_debug:
+        if debug.get('is_star') and not debug.get('matched') and debug.get('source') == 'unknown':
+            unconfirmed_stars.append((debug.get('team'), debug.get('player')))
+    
+    if unconfirmed_stars:
+        print("=" * 90)
+        print("⚠ STAR PLAYER ALERTS (not found in any data source)")
+        print("=" * 90)
+        for team, player in unconfirmed_stars:
+            print(f"  {team}: {player} - STATUS UNKNOWN")
+            print(f"       → Verify status via news/social media")
+            print(f"       → Add to data/known_absences.csv if confirmed out")
+        print("=" * 90)
+        print()
     
     # Show top factors
     print("TOP FACTORS BY GAME:")
-    print("-" * 80)
+    print("-" * 90)
     for score in scores:
         matchup = f"{score.away_team} @ {score.home_team}"
         print(f"{matchup}: {score.top_5_factors_str}")
-    print("-" * 80)
+    print("-" * 90)
     print()
     
     # Step 7: Save outputs
-    print("[7/7] Saving outputs...")
+    print("[7/8] Saving outputs...")
     
     pred_path = save_predictions_csv(scores, timestamp)
     print(f"  Predictions: {pred_path}")
