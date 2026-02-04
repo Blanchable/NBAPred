@@ -123,6 +123,12 @@ Examples:
         help="Backfill predictions for date range (YYYY-MM-DD)"
     )
     
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear cached historical stats before running"
+    )
+    
     return parser.parse_args()
 
 
@@ -318,6 +324,14 @@ def create_prediction_log_entries(
 def main() -> int:
     """Main entry point for daily prediction run."""
     args = parse_args()
+    
+    # Handle cache clearing
+    if args.clear_cache:
+        from utils.storage import clear_cache, CACHE_DIR
+        deleted = clear_cache()
+        print(f"Cleared {deleted} cached files from {CACHE_DIR}")
+        if not args.date and not args.backfill:
+            return 0  # Just clearing cache, nothing else to do
     
     # Handle special modes first
     if args.update_results:
