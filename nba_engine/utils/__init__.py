@@ -1,5 +1,80 @@
-"""Utility functions for the NBA prediction engine."""
+"""Utility modules for NBA Prediction Engine."""
 
-from .normalization import clamp, normalize_to_range, z_score
+from .dates import (
+    get_eastern_now,
+    get_eastern_date,
+    parse_date,
+    format_date,
+    get_date_limit,
+    enforce_date_limit,
+    validate_date_range,
+    get_date_range,
+    is_today,
+    days_ago,
+    get_season_for_date,
+    MAX_MONTHS_BACK,
+    DEFAULT_MAX_DAYS_PER_RUN,
+)
 
-__all__ = ['clamp', 'normalize_to_range', 'z_score']
+from .storage import (
+    PredictionLogEntry,
+    PerformanceSummary,
+    load_predictions_log,
+    save_predictions_log,
+    append_predictions,
+    update_results_in_log,
+    get_entries_for_date,
+    get_entries_needing_results,
+    export_daily_predictions,
+    import_results_from_csv,
+    compute_performance_summary,
+    save_performance_summary,
+    format_performance_summary,
+    load_cache,
+    save_cache,
+    clear_cache,
+    PREDICTIONS_LOG_PATH,
+    PERFORMANCE_SUMMARY_PATH,
+    OUTPUTS_DIR,
+    LOGS_DIR,
+    CACHE_DIR,
+)
+
+__all__ = [
+    # Dates
+    "get_eastern_now",
+    "get_eastern_date",
+    "parse_date",
+    "format_date",
+    "get_date_limit",
+    "enforce_date_limit",
+    "validate_date_range",
+    "get_date_range",
+    "is_today",
+    "days_ago",
+    "get_season_for_date",
+    "MAX_MONTHS_BACK",
+    "DEFAULT_MAX_DAYS_PER_RUN",
+    # Storage
+    "PredictionLogEntry",
+    "PerformanceSummary",
+    "load_predictions_log",
+    "save_predictions_log",
+    "append_predictions",
+    "update_results_in_log",
+    "get_entries_for_date",
+    "get_entries_needing_results",
+    "export_daily_predictions",
+    "import_results_from_csv",
+    "compute_performance_summary",
+    "save_performance_summary",
+    "format_performance_summary",
+    "load_cache",
+    "save_cache",
+    "clear_cache",
+    "PREDICTIONS_LOG_PATH",
+    "PERFORMANCE_SUMMARY_PATH",
+    "OUTPUTS_DIR",
+    "LOGS_DIR",
+    "CACHE_DIR",
+]
