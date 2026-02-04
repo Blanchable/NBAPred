@@ -139,46 +139,70 @@ def backfill_predictions(
         home_stats_dict = home_ts.to_dict()
         away_stats_dict = away_ts.to_dict()
         
-        # Create minimal TeamStrength-like object for lineup adjustment
-        class MinimalStrength:
+        # Create strength object that passes through ALL actual stats
+        class HistoricalStrength:
+            """Wraps historical team stats for compatibility with scoring model."""
             def __init__(self, stats_dict):
+                self._stats = stats_dict
+                # Core ratings
                 self.net_rating = stats_dict.get('net_rating', 0)
                 self.off_rating = stats_dict.get('off_rating', 110)
                 self.def_rating = stats_dict.get('def_rating', 110)
                 self.home_net_rating = stats_dict.get('home_net_rating', self.net_rating + 2)
                 self.road_net_rating = stats_dict.get('road_net_rating', self.net_rating - 2)
+                # Advanced stats
+                self.pace = stats_dict.get('pace', 100)
+                self.efg_pct = stats_dict.get('efg_pct', 0.52)
+                self.tov_pct = stats_dict.get('tov_pct', 14)
+                self.oreb_pct = stats_dict.get('oreb_pct', 25)
+                self.ft_rate = stats_dict.get('ft_rate', 0.25)
+                self.fg3_pct = stats_dict.get('fg3_pct', 0.36)
+                self.fg3a_rate = stats_dict.get('fg3a_rate', 0.40)
             
             def to_dict(self):
+                """Return ALL actual stats, not hardcoded defaults."""
                 return {
                     'net_rating': self.net_rating,
                     'off_rating': self.off_rating,
                     'def_rating': self.def_rating,
                     'home_net_rating': self.home_net_rating,
                     'road_net_rating': self.road_net_rating,
-                    'pace': 100,
-                    'efg_pct': 0.52,
-                    'tov_pct': 14,
-                    'oreb_pct': 25,
-                    'ft_rate': 0.25,
-                    'fg3_pct': 0.36,
-                    'fg3a_rate': 0.40,
+                    'pace': self.pace,
+                    'efg_pct': self.efg_pct,
+                    'tov_pct': self.tov_pct,
+                    'oreb_pct': self.oreb_pct,
+                    'ft_rate': self.ft_rate,
+                    'fg3_pct': self.fg3_pct,
+                    'fg3a_rate': self.fg3a_rate,
+                    # Include any additional stats from the source
+                    **{k: v for k, v in self._stats.items() 
+                       if k not in ['team', 'as_of_date', 'games_played', 'wins', 'losses']}
                 }
         
-        home_strength = MinimalStrength(home_stats_dict)
-        away_strength = MinimalStrength(away_stats_dict)
+        home_strength = HistoricalStrength(home_stats_dict)
+        away_strength = HistoricalStrength(away_stats_dict)
         
         # Convert AsOfPlayerStats to objects with expected attributes
-        class MinimalPlayer:
+        class HistoricalPlayer:
+            """Wraps historical player stats for compatibility with scoring model."""
             def __init__(self, p):
                 self.player_name = p.player_name
+                self.player_id = getattr(p, 'player_id', '')
+                self.team = getattr(p, 'team', '')
                 self.points_per_game = p.points_per_game
+                self.ppg = p.points_per_game  # Alias
                 self.assists_per_game = p.assists_per_game
+                self.apg = p.assists_per_game  # Alias
                 self.minutes_per_game = p.minutes_per_game
+                self.mpg = p.minutes_per_game  # Alias
+                self.rebounds_per_game = getattr(p, 'rebounds_per_game', 0)
                 self.impact_score = p.impact_score
-                self.status = "Available"
+                self.status = "Available"  # No injury data for historical
+                self.is_star = False  # Will be set by lineup adjustment
+                self.impact_rank = 0  # Will be set by lineup adjustment
         
-        home_players_obj = [MinimalPlayer(p) for p in home_players]
-        away_players_obj = [MinimalPlayer(p) for p in away_players]
+        home_players_obj = [HistoricalPlayer(p) for p in home_players]
+        away_players_obj = [HistoricalPlayer(p) for p in away_players]
         
         # Calculate lineup adjusted strength
         try:
