@@ -28,7 +28,8 @@ import re
 # V3: Updated with home/road split replacing generic home court
 FACTOR_WEIGHTS = {
     "lineup_net_rating": 14,     # Lineup-adjusted net rating
-    "star_availability": 13,     # Injury impact on key players
+    "star_impact": 9,            # Tiered star availability (replaces old star_availability)
+    "rotation_replacement": 4,   # Next-man-up quality when star is out
     "off_vs_def": 8,             # Offensive vs defensive matchup
     "turnover_diff": 6,          # Ball security
     "shot_quality": 6,           # eFG% advantage
@@ -56,7 +57,8 @@ assert _weight_sum == 100, f"Weights sum to {_weight_sum}, not 100"
 # Factor display names
 FACTOR_NAMES = {
     "lineup_net_rating": "Lineup Net Rating",
-    "star_availability": "Star Availability",
+    "star_impact": "Star Impact",
+    "rotation_replacement": "Rotation Replacement",
     "off_vs_def": "Off vs Def Efficiency",
     "turnover_diff": "Turnover Differential",
     "shot_quality": "Shot Quality",
@@ -342,15 +344,95 @@ def calc_lineup_net_rating(
     )
 
 
-def calc_star_availability(
+def calc_star_impact(
+    home_players: list,
+    away_players: list,
+    home_injuries: list = None,
+    away_injuries: list = None,
+    context: dict = None,
+) -> tuple[FactorResult, dict]:
+    """
+    Factor 2: Star Impact (9 points)
+    Tiered star availability system.
+    
+    Tier A (top star) = 4 points
+    Tier B (next 2 stars) = 2 points each
+    """
+    from .star_impact import compute_star_factor, format_star_detail
+    
+    signed_value, dampened_edge, detail = compute_star_factor(
+        home_players, away_players,
+        home_injuries, away_injuries,
+        context,
+    )
+    
+    weight = FACTOR_WEIGHTS["star_impact"]
+    contribution = weight * signed_value
+    
+    inputs = format_star_detail(detail)
+    
+    return FactorResult(
+        name="star_impact",
+        display_name=FACTOR_NAMES["star_impact"],
+        weight=weight,
+        signed_value=signed_value,
+        contribution=contribution,
+        inputs_used=inputs,
+    ), detail
+
+
+def calc_rotation_replacement(
+    home_players: list,
+    away_players: list,
+    home_tiers: dict,
+    away_tiers: dict,
+    home_injuries: list = None,
+    away_injuries: list = None,
+) -> tuple[FactorResult, dict]:
+    """
+    Factor 3: Rotation Replacement (4 points)
+    Only activates when Tier A/B star is OUT or DOUBTFUL.
+    Evaluates next-man-up quality.
+    """
+    from .rotation_replacement import compute_rotation_replacement, format_replacement_detail, REPLACEMENT_EDGE_CLAMP
+    
+    edge_points, detail = compute_rotation_replacement(
+        home_players, away_players,
+        home_tiers, away_tiers,
+        home_injuries, away_injuries,
+    )
+    
+    weight = FACTOR_WEIGHTS["rotation_replacement"]
+    
+    if detail.get("active"):
+        signed_value = edge_points / REPLACEMENT_EDGE_CLAMP
+        signed_value = max(-1.0, min(1.0, signed_value))
+        contribution = weight * signed_value
+    else:
+        signed_value = 0.0
+        contribution = 0.0
+    
+    inputs = format_replacement_detail(detail)
+    
+    return FactorResult(
+        name="rotation_replacement",
+        display_name=FACTOR_NAMES["rotation_replacement"],
+        weight=weight,
+        signed_value=signed_value,
+        contribution=contribution,
+        inputs_used=inputs,
+    ), detail
+
+
+def calc_star_availability_legacy(
     home_availability: float,
     away_availability: float,
     home_missing: list[str],
     away_missing: list[str],
 ) -> FactorResult:
     """
-    Factor 2: Star Availability (13 points)
-    Impact of injuries on key players.
+    DEPRECATED: Legacy star availability for backward compatibility.
+    Use calc_star_impact instead for new code.
     """
     delta = home_availability - away_availability
     signed_value = clamp(delta / SCALES["availability"])
@@ -369,11 +451,11 @@ def calc_star_availability(
         inputs += f" | {'; '.join(missing_info)}"
     
     return FactorResult(
-        name="star_availability",
-        display_name=FACTOR_NAMES["star_availability"],
-        weight=FACTOR_WEIGHTS["star_availability"],
+        name="star_impact",
+        display_name=FACTOR_NAMES["star_impact"],
+        weight=FACTOR_WEIGHTS["star_impact"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["star_availability"] * signed_value,
+        contribution=FACTOR_WEIGHTS["star_impact"] * signed_value,
         inputs_used=inputs,
     )
 
@@ -714,11 +796,16 @@ def score_game_v3(
     away_stats: dict,
     home_rest_days: int = 1,
     away_rest_days: int = 1,
+    home_players: list = None,
+    away_players: list = None,
+    home_injuries: list = None,
+    away_injuries: list = None,
 ) -> GameScore:
     """
     Score a game using the v3 20-factor weighted point system.
     
-    This version uses lineup-adjusted strengths and home/road splits.
+    This version uses lineup-adjusted strengths, home/road splits,
+    and the new tiered star impact system.
     """
     # Extract strength values
     if hasattr(home_strength, 'adjusted_net_rating'):
@@ -754,9 +841,45 @@ def score_game_v3(
     
     factors = []
     
-    # Calculate all 20 factors
+    # Calculate all factors
     factors.append(calc_lineup_net_rating(home_adj_net, away_adj_net))
-    factors.append(calc_star_availability(home_availability, away_availability, home_missing, away_missing))
+    
+    # Star Impact and Rotation Replacement (new tiered system)
+    if home_players and away_players:
+        # Use new star impact system with player data
+        star_factor, star_detail = calc_star_impact(
+            home_players, away_players,
+            home_injuries, away_injuries,
+        )
+        factors.append(star_factor)
+        
+        # Get tiers for rotation replacement
+        from .star_impact import select_star_tiers
+        home_tiers = select_star_tiers(home_players)
+        away_tiers = select_star_tiers(away_players)
+        
+        # Rotation replacement (only activates for star absences)
+        repl_factor, repl_detail = calc_rotation_replacement(
+            home_players, away_players,
+            home_tiers, away_tiers,
+            home_injuries, away_injuries,
+        )
+        factors.append(repl_factor)
+    else:
+        # Fallback to legacy availability-based calculation
+        factors.append(calc_star_availability_legacy(
+            home_availability, away_availability,
+            home_missing, away_missing
+        ))
+        # Add zero rotation replacement factor when no player data
+        factors.append(FactorResult(
+            name="rotation_replacement",
+            display_name=FACTOR_NAMES["rotation_replacement"],
+            weight=FACTOR_WEIGHTS["rotation_replacement"],
+            signed_value=0.0,
+            contribution=0.0,
+            inputs_used="INACTIVE (no player data)",
+        ))
     factors.append(calc_off_vs_def(home_off, home_def, away_off, away_def))
     factors.append(calc_turnover_diff(safe_get(home_stats, 'tov_pct', 14), safe_get(away_stats, 'tov_pct', 14)))
     factors.append(calc_shot_quality(safe_get(home_stats, 'efg_pct', 0.52), safe_get(away_stats, 'efg_pct', 0.52)))

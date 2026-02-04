@@ -28,6 +28,24 @@ from .calibration import (
     edge_to_margin,
     margin_to_win_prob,
 )
+from .star_impact import (
+    compute_star_factor,
+    select_star_tiers,
+    status_multiplier,
+    team_star_points,
+    star_edge_points,
+    dampened_star_edge,
+    TIER_A_POINTS,
+    TIER_B_POINTS,
+    STAR_EDGE_CLAMP,
+)
+from .rotation_replacement import (
+    compute_rotation_replacement,
+    star_absent,
+    get_absent_stars,
+    get_replacement_candidates,
+    REPLACEMENT_EDGE_CLAMP,
+)
 
 __all__ = [
     # Point system
@@ -53,4 +71,20 @@ __all__ = [
     "PredictionLogger",
     "PredictionRecord",
     "edge_to_win_prob",
+    # Star impact
+    "compute_star_factor",
+    "select_star_tiers",
+    "status_multiplier",
+    "team_star_points",
+    "star_edge_points",
+    "dampened_star_edge",
+    "TIER_A_POINTS",
+    "TIER_B_POINTS",
+    "STAR_EDGE_CLAMP",
+    # Rotation replacement
+    "compute_rotation_replacement",
+    "star_absent",
+    "get_absent_stars",
+    "get_replacement_candidates",
+    "REPLACEMENT_EDGE_CLAMP",
 ]

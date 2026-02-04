@@ -400,6 +400,10 @@ class NBAPredictor(tk.Tk):
                 home_stats = home_ts.to_dict() if hasattr(home_ts, 'to_dict') else home_ts
                 away_stats = away_ts.to_dict() if hasattr(away_ts, 'to_dict') else away_ts
                 
+                # Filter injuries by team for star impact calculation
+                home_injuries = [inj for inj in self.injuries if getattr(inj, 'team', '').upper() == game.home_team.upper()]
+                away_injuries = [inj for inj in self.injuries if getattr(inj, 'team', '').upper() == game.away_team.upper()]
+                
                 score = score_game_v3(
                     home_team=game.home_team,
                     away_team=game.away_team,
@@ -409,6 +413,10 @@ class NBAPredictor(tk.Tk):
                     away_stats=away_stats,
                     home_rest_days=rest_days.get(game.home_team, 1),
                     away_rest_days=rest_days.get(game.away_team, 1),
+                    home_players=home_players,
+                    away_players=away_players,
+                    home_injuries=home_injuries,
+                    away_injuries=away_injuries,
                 )
                 self.scores.append(score)
             
