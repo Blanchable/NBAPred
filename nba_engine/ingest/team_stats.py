@@ -351,34 +351,97 @@ def get_team_rest_days(
     return rest_days
 
 
-# Fallback data
-def get_fallback_team_strength() -> dict[str, TeamStrength]:
-    """Return fallback team strength data."""
-    fallback = {
-        "OKC": (11.0, 118.5, 107.5), "CLE": (9.6, 117.8, 108.2), "BOS": (9.4, 120.2, 110.8),
-        "HOU": (7.3, 113.5, 106.2), "MEM": (6.3, 115.8, 109.5), "NYK": (5.7, 116.2, 110.5),
-        "DEN": (5.3, 116.8, 111.5), "LAL": (4.7, 114.5, 109.8), "MIN": (4.3, 112.8, 108.5),
-        "GSW": (4.0, 115.2, 111.2), "MIL": (3.6, 114.8, 111.2), "DAL": (3.3, 116.5, 113.2),
-        "LAC": (2.7, 113.2, 110.5), "DET": (2.3, 112.5, 110.2), "MIA": (1.8, 111.8, 110.0),
-        "SAC": (1.4, 114.2, 112.8), "IND": (1.3, 116.8, 115.5), "PHX": (1.0, 113.5, 112.5),
-        "ATL": (0.8, 115.0, 114.2), "ORL": (0.5, 108.5, 108.0), "SAS": (-0.3, 111.2, 111.5),
-        "CHI": (-0.7, 111.8, 112.5), "BKN": (-1.3, 110.5, 111.8), "POR": (-2.0, 109.2, 111.2),
-        "TOR": (-2.4, 110.8, 113.2), "PHI": (-3.0, 109.5, 112.5), "NOP": (-4.3, 109.2, 113.5),
-        "CHA": (-6.3, 107.5, 113.8), "UTA": (-7.3, 108.2, 115.5), "WAS": (-11.7, 106.5, 118.2),
-    }
+# Comprehensive fallback data with per-team advanced stats
+# Format: (net, off, def, pace, efg, tov, oreb, ft_rate, fg3, fg3a_rate, opp_efg, opp_tov, opp_oreb)
+FALLBACK_TEAM_DATA = {
+    # Team: (net_rtg, off_rtg, def_rtg, pace, efg%, tov%, oreb%, ft_rate, fg3%, fg3a_rate, opp_efg%, opp_tov%, opp_oreb%)
+    "OKC": (11.0, 118.5, 107.5, 99.2, 0.558, 12.1, 27.8, 0.282, 0.378, 0.425, 0.498, 15.2, 23.1),
+    "CLE": (9.6, 117.8, 108.2, 97.5, 0.562, 12.8, 26.2, 0.268, 0.392, 0.418, 0.502, 14.8, 24.5),
+    "BOS": (9.4, 120.2, 110.8, 100.8, 0.572, 13.2, 24.8, 0.258, 0.398, 0.468, 0.512, 14.2, 25.2),
+    "HOU": (7.3, 113.5, 106.2, 98.8, 0.535, 13.5, 29.5, 0.298, 0.352, 0.402, 0.495, 15.8, 22.8),
+    "MEM": (6.3, 115.8, 109.5, 101.2, 0.542, 13.8, 28.2, 0.275, 0.348, 0.385, 0.508, 14.5, 24.2),
+    "NYK": (5.7, 116.2, 110.5, 98.2, 0.548, 12.5, 26.8, 0.288, 0.368, 0.398, 0.515, 14.2, 25.8),
+    "DEN": (5.3, 116.8, 111.5, 99.5, 0.555, 13.2, 25.5, 0.262, 0.382, 0.392, 0.522, 13.8, 26.2),
+    "LAL": (4.7, 114.5, 109.8, 100.5, 0.545, 13.8, 27.2, 0.278, 0.358, 0.405, 0.512, 14.5, 25.5),
+    "MIN": (4.3, 112.8, 108.5, 97.8, 0.538, 12.8, 25.8, 0.255, 0.368, 0.412, 0.502, 15.2, 24.8),
+    "GSW": (4.0, 115.2, 111.2, 100.2, 0.552, 14.2, 24.2, 0.248, 0.395, 0.445, 0.518, 13.8, 26.5),
+    "MIL": (3.6, 114.8, 111.2, 99.8, 0.548, 13.5, 26.5, 0.285, 0.372, 0.408, 0.515, 14.2, 25.2),
+    "DAL": (3.3, 116.5, 113.2, 99.2, 0.555, 12.2, 24.8, 0.265, 0.388, 0.438, 0.525, 13.5, 26.8),
+    "LAC": (2.7, 113.2, 110.5, 98.5, 0.542, 13.2, 25.2, 0.272, 0.375, 0.415, 0.512, 14.8, 25.5),
+    "DET": (2.3, 112.5, 110.2, 98.2, 0.528, 14.2, 28.5, 0.268, 0.342, 0.385, 0.508, 14.2, 24.8),
+    "MIA": (1.8, 111.8, 110.0, 97.5, 0.532, 13.8, 26.2, 0.258, 0.362, 0.402, 0.515, 14.5, 25.2),
+    "SAC": (1.4, 114.2, 112.8, 101.5, 0.545, 13.5, 25.5, 0.275, 0.378, 0.425, 0.522, 13.2, 26.5),
+    "IND": (1.3, 116.8, 115.5, 103.2, 0.552, 13.2, 26.8, 0.282, 0.385, 0.432, 0.532, 13.5, 27.2),
+    "PHX": (1.0, 113.5, 112.5, 98.8, 0.538, 13.5, 25.2, 0.268, 0.372, 0.408, 0.518, 14.2, 26.2),
+    "ATL": (0.8, 115.0, 114.2, 100.2, 0.542, 14.5, 24.8, 0.265, 0.382, 0.422, 0.528, 13.8, 27.5),
+    "ORL": (0.5, 108.5, 108.0, 96.8, 0.518, 13.2, 28.8, 0.245, 0.338, 0.368, 0.498, 15.5, 23.5),
+    "SAS": (-0.3, 111.2, 111.5, 99.5, 0.525, 14.8, 27.2, 0.258, 0.352, 0.395, 0.512, 14.2, 25.8),
+    "CHI": (-0.7, 111.8, 112.5, 98.8, 0.528, 14.2, 26.5, 0.262, 0.358, 0.398, 0.518, 13.8, 26.2),
+    "BKN": (-1.3, 110.5, 111.8, 99.2, 0.522, 14.5, 25.8, 0.255, 0.365, 0.415, 0.522, 14.2, 26.8),
+    "POR": (-2.0, 109.2, 111.2, 100.5, 0.518, 15.2, 26.2, 0.248, 0.348, 0.425, 0.528, 13.5, 27.2),
+    "TOR": (-2.4, 110.8, 113.2, 99.8, 0.525, 14.8, 25.5, 0.252, 0.362, 0.412, 0.532, 13.8, 27.5),
+    "PHI": (-3.0, 109.5, 112.5, 97.2, 0.518, 14.5, 27.5, 0.268, 0.345, 0.388, 0.525, 14.5, 26.5),
+    "NOP": (-4.3, 109.2, 113.5, 98.5, 0.515, 15.2, 28.2, 0.255, 0.338, 0.378, 0.535, 14.2, 27.8),
+    "CHA": (-6.3, 107.5, 113.8, 100.2, 0.508, 15.8, 27.8, 0.248, 0.332, 0.402, 0.538, 13.2, 28.2),
+    "UTA": (-7.3, 108.2, 115.5, 99.8, 0.512, 15.5, 26.8, 0.252, 0.342, 0.418, 0.542, 13.5, 28.5),
+    "WAS": (-11.7, 106.5, 118.2, 101.5, 0.498, 16.2, 25.5, 0.245, 0.328, 0.412, 0.555, 12.8, 29.2),
+}
+
+
+def get_fallback_team_strength(team: str = None) -> dict[str, TeamStrength]:
+    """
+    Return fallback team strength data with full advanced stats.
     
+    Args:
+        team: If provided, returns dict with only that team. Otherwise returns all teams.
+    
+    Returns:
+        Dict mapping team abbreviation to TeamStrength object with complete stats.
+    """
     teams = {}
-    for abbrev, (net, off, def_) in fallback.items():
+    
+    for abbrev, data in FALLBACK_TEAM_DATA.items():
+        if team is not None and abbrev != team:
+            continue
+            
+        (net, off, def_, pace, efg, tov, oreb, ft_rate, 
+         fg3, fg3a_rate, opp_efg, opp_tov, opp_oreb) = data
+        
         ts = TeamStrength(
             team=abbrev,
             net_rating=net,
             off_rating=off,
             def_rating=def_,
-            pace=100.0,
+            pace=pace,
             home_net_rating=net + 2,
             road_net_rating=net - 2,
             blended_net_rating=net,
+            # Advanced offensive stats
+            efg_pct=efg,
+            tov_pct=tov,
+            oreb_pct=oreb,
+            ft_rate=ft_rate,
+            fg3_pct=fg3,
+            fg3a_rate=fg3a_rate,
+            # Defensive stats
+            opp_efg_pct=opp_efg,
+            opp_tov_pct=opp_tov,
+            opp_oreb_pct=opp_oreb,
+            # Volatility based on 3PA rate and TOV
+            volatility_score=min(1.0, max(0.0, (fg3a_rate - 0.35) * 2 + (tov - 12) * 0.05)),
         )
         teams[abbrev] = ts
+    
+    if not teams:
+        # If team not found in fallback, create with league averages
+        print(f"  WARNING: Team '{team}' not in fallback data, using league averages")
+        ts = TeamStrength(
+            team=team or "UNK",
+            net_rating=0.0,
+            off_rating=110.0,
+            def_rating=110.0,
+            pace=99.0,
+        )
+        teams[team or "UNK"] = ts
     
     return teams
