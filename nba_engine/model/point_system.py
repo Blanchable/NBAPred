@@ -117,6 +117,11 @@ MARGIN_PROB_SCALE = 7.0
 PROB_MIN = 0.05
 PROB_MAX = 0.95
 
+# Confidence bucket thresholds (configurable)
+# These define the boundaries for HIGH / MEDIUM / LOW confidence labels
+CONF_HIGH_MIN = 65.0   # confidence_pct >= 65.0 -> HIGH
+CONF_MED_MIN = 57.5    # confidence_pct >= 57.5 -> MEDIUM, else LOW
+
 
 # ============================================================================
 # DATA CLASSES
@@ -159,22 +164,41 @@ class GameScore:
         return self.confidence  # confidence IS the pick probability now
     
     @property
+    def confidence_pct_value(self) -> float:
+        """Get confidence as percentage float (0.0-100.0)."""
+        return round(self.confidence * 100, 1)
+    
+    @property
     def confidence_pct(self) -> str:
         """Get confidence as percentage string."""
-        return f"{self.confidence * 100:.0f}%"
+        return f"{self.confidence_pct_value:.1f}%"
+    
+    @property
+    def confidence_bucket(self) -> str:
+        """
+        Get confidence bucket label (HIGH / MEDIUM / LOW).
+        Based on configurable thresholds CONF_HIGH_MIN and CONF_MED_MIN.
+        """
+        pct = self.confidence_pct_value
+        if pct >= CONF_HIGH_MIN:
+            return "HIGH"
+        elif pct >= CONF_MED_MIN:
+            return "MEDIUM"
+        else:
+            return "LOW"
     
     @property
     def confidence_label(self) -> str:
         """
         Get confidence category label (for UI tagging).
-        Based on win probability thresholds.
+        Based on configurable thresholds. Returns lowercase for CSS/tag usage.
         """
-        if self.confidence >= 0.65:
-            return "high"
-        elif self.confidence >= 0.55:
-            return "medium"
-        else:
-            return "low"
+        return self.confidence_bucket.lower()
+    
+    @property
+    def confidence_display(self) -> str:
+        """Get formatted confidence display: '71.3% (HIGH)'."""
+        return f"{self.confidence_pct} ({self.confidence_bucket})"
     
     @property
     def top_5_factors_str(self) -> str:
