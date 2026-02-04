@@ -2,8 +2,9 @@
 Excel Tracking Module for NBA Prediction Engine.
 
 Manages a single persistent Excel workbook with:
-- Picks sheet: One block of picks per calendar date (overwrite-by-day)
-- Summary sheet: Auto-calculated winrate statistics
+- LOG sheet: Main picks table with daily overwrite behavior
+- STATS sheet: Auto-calculated winrate statistics by bucket
+- SETTINGS sheet: Configuration thresholds and version info
 
 The engine ONLY supports today's slate - no historical/backfill functionality.
 """
@@ -15,9 +16,11 @@ from typing import List, Optional, Dict
 import os
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, NamedStyle
 from openpyxl.utils import get_column_letter
-from openpyxl.formatting.rule import FormulaRule
+from openpyxl.formatting.rule import FormulaRule, CellIsRule
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 # Constants
@@ -25,98 +28,117 @@ TRACKING_DIR = Path(__file__).parent.parent / "outputs" / "tracking"
 TRACKING_FILE_PATH = TRACKING_DIR / "NBA_Engine_Tracking.xlsx"
 
 # Sheet names
-PICKS_SHEET = "Picks"
-SUMMARY_SHEET = "Summary"
+LOG_SHEET = "LOG"
+STATS_SHEET = "STATS"
+SETTINGS_SHEET = "SETTINGS"
 
-# Column headers for Picks sheet (exact order per spec)
-PICKS_COLUMNS = [
-    "run_date",              # A - YYYY-MM-DD
-    "run_timestamp",         # B - YYYY-MM-DD HH:MM:SS local
-    "game_id",               # C - string or blank
-    "away_team",             # D
-    "home_team",             # E
-    "pick_team",             # F
-    "pick_side",             # G - HOME or AWAY
-    "confidence_level",      # H - HIGH, MEDIUM, LOW
-    "edge_score_total",      # I
-    "projected_margin_home", # J
-    "home_win_prob",         # K
-    "away_win_prob",         # L
-    "top_5_factors",         # M
-    "data_confidence",       # N - HIGH, MEDIUM, LOW
-    "actual_winner",         # O - BLANK (user fills manually)
-    "correct",               # P - formula-driven
-    "notes",                 # Q - optional
+# Column headers for LOG sheet (exact order per spec)
+LOG_COLUMNS = [
+    "Date",               # A - YYYY-MM-DD
+    "Game_ID",            # B - string or blank
+    "Away",               # C - away team abbrev
+    "Home",               # D - home team abbrev
+    "Pick",               # E - picked team
+    "Side",               # F - HOME or AWAY
+    "Conf_%",             # G - confidence percentage (float)
+    "Bucket",             # H - HIGH/MED/LOW
+    "Model_Prob",         # I - 0-1 probability
+    "Edge",               # J - edge score
+    "Away_Score",         # K - user fills
+    "Home_Score",         # L - user fills
+    "Result",             # M - W/L (auto-calc or user fills)
+    "Notes",              # N - optional
 ]
 
+# Colors for bucket conditional formatting
+COLORS = {
+    'high_fill': PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),  # Light green
+    'high_font': Font(color="006100", bold=True),
+    'med_fill': PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),   # Light yellow/amber
+    'med_font': Font(color="9C6500", bold=True),
+    'low_fill': PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),   # Light red
+    'low_font': Font(color="9C0006", bold=True),
+    'win_fill': PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    'loss_fill': PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+    'header_fill': PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid"),
+    'header_font': Font(color="FFFFFF", bold=True, size=11),
+    'alt_row_fill': PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"),
+}
+
 # Styles
-HEADER_FONT = Font(bold=True)
-GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+HEADER_FONT = Font(bold=True, size=11, color="FFFFFF")
+HEADER_FILL = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
 THIN_BORDER = Border(
-    left=Side(style='thin'),
-    right=Side(style='thin'),
-    top=Side(style='thin'),
-    bottom=Side(style='thin')
+    left=Side(style='thin', color='D9D9D9'),
+    right=Side(style='thin', color='D9D9D9'),
+    top=Side(style='thin', color='D9D9D9'),
+    bottom=Side(style='thin', color='D9D9D9')
 )
 
 
 @dataclass
 class PickEntry:
-    """A single prediction entry for the Picks sheet."""
+    """A single prediction entry for the LOG sheet."""
     run_date: str
-    run_timestamp: str
     game_id: str
     away_team: str
     home_team: str
     pick_team: str
-    pick_side: str  # "HOME" or "AWAY"
-    confidence_level: str  # "HIGH", "MEDIUM", "LOW"
-    edge_score_total: float
-    projected_margin_home: float
-    home_win_prob: float
-    away_win_prob: float
-    top_5_factors: str
-    data_confidence: str
-    actual_winner: str = ""  # Blank - user fills
+    pick_side: str           # "HOME" or "AWAY"
+    confidence_pct: float    # e.g., 71.3
+    confidence_bucket: str   # "HIGH", "MED", "LOW"
+    model_prob: float        # 0-1 probability
+    edge_score: float
+    away_score: str = ""     # Blank - user fills
+    home_score: str = ""     # Blank - user fills
+    result: str = ""         # W/L - auto-calc or user fills
     notes: str = ""
     
+    # Legacy compatibility fields
+    run_timestamp: str = ""
+    confidence_level: str = ""
+    edge_score_total: float = 0.0
+    projected_margin_home: float = 0.0
+    home_win_prob: float = 0.0
+    away_win_prob: float = 0.0
+    top_5_factors: str = ""
+    data_confidence: str = ""
+    actual_winner: str = ""
+    
     def to_row(self, row_num: int) -> list:
-        """Convert to row values with formula for correct column."""
-        # Formula: =IF(O{row}="","",IF(O{row}=F{row},1,0))
-        correct_formula = f'=IF(O{row_num}="","",IF(O{row_num}=F{row_num},1,0))'
+        """Convert to row values with formula for Result column."""
+        # Auto-calc Result formula:
+        # =IF(OR(K{row}="",L{row}=""),"",IF(AND(F{row}="HOME",L{row}>K{row}),"W",IF(AND(F{row}="AWAY",K{row}>L{row}),"W","L")))
+        result_formula = f'=IF(OR(K{row_num}="",L{row_num}=""),"",IF(AND(F{row_num}="HOME",L{row_num}>K{row_num}),"W",IF(AND(F{row_num}="AWAY",K{row_num}>L{row_num}),"W","L")))'
         
         return [
             self.run_date,
-            self.run_timestamp,
             self.game_id,
             self.away_team,
             self.home_team,
             self.pick_team,
             self.pick_side,
-            self.confidence_level,
-            self.edge_score_total,
-            self.projected_margin_home,
-            self.home_win_prob,
-            self.away_win_prob,
-            self.top_5_factors,
-            self.data_confidence,
-            self.actual_winner,
-            correct_formula,  # Formula, not value
+            self.confidence_pct,
+            self.confidence_bucket,
+            round(self.model_prob, 3),
+            round(self.edge_score, 2),
+            self.away_score,
+            self.home_score,
+            result_formula,  # Formula for auto-calc
             self.notes,
         ]
 
 
 @dataclass
 class WinrateStats:
-    """Winrate statistics computed from the Picks sheet."""
+    """Winrate statistics computed from the LOG sheet."""
     # Overall
     total_graded: int = 0
     wins: int = 0
     losses: int = 0
     win_pct: float = 0.0
     
-    # By confidence level
+    # By confidence bucket
     high_graded: int = 0
     high_wins: int = 0
     high_losses: int = 0
@@ -132,11 +154,16 @@ class WinrateStats:
     low_losses: int = 0
     low_win_pct: float = 0.0
     
-    # Pending (no actual_winner)
+    # Pending (no result yet)
     pending_total: int = 0
     pending_high: int = 0
     pending_medium: int = 0
     pending_low: int = 0
+    
+    # Counts
+    total_high: int = 0
+    total_medium: int = 0
+    total_low: int = 0
 
 
 class ExcelTracker:
@@ -146,7 +173,9 @@ class ExcelTracker:
     Key features:
     - Single persistent workbook at outputs/tracking/NBA_Engine_Tracking.xlsx
     - Overwrite-by-day: Running multiple times replaces that day's picks
-    - Summary sheet with auto-calculated winrate stats
+    - LOG sheet with proper table formatting and conditional formatting
+    - STATS sheet with auto-calculated winrate stats
+    - SETTINGS sheet with configuration thresholds
     """
     
     def __init__(self, file_path: Path = None):
@@ -159,111 +188,304 @@ class ExcelTracker:
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
     
     def _create_new_workbook(self) -> Workbook:
-        """Create a new workbook with Picks and Summary sheets."""
+        """Create a new workbook with LOG, STATS, and SETTINGS sheets."""
         wb = Workbook()
         
-        # Rename default sheet to Picks
-        picks_sheet = wb.active
-        picks_sheet.title = PICKS_SHEET
+        # Rename default sheet to LOG
+        log_sheet = wb.active
+        log_sheet.title = LOG_SHEET
+        self._initialize_log_sheet(log_sheet)
         
-        # Add header row
-        for col_idx, header in enumerate(PICKS_COLUMNS, 1):
-            cell = picks_sheet.cell(row=1, column=col_idx, value=header)
-            cell.font = HEADER_FONT
-            cell.alignment = Alignment(horizontal='center')
+        # Create STATS sheet
+        stats_sheet = wb.create_sheet(STATS_SHEET)
+        self._initialize_stats_sheet(stats_sheet)
         
-        # Freeze header row
-        picks_sheet.freeze_panes = 'A2'
-        
-        # Enable auto-filter
-        picks_sheet.auto_filter.ref = f"A1:{get_column_letter(len(PICKS_COLUMNS))}1"
-        
-        # Set column widths
-        column_widths = {
-            'A': 12,  # run_date
-            'B': 20,  # run_timestamp
-            'C': 12,  # game_id
-            'D': 10,  # away_team
-            'E': 10,  # home_team
-            'F': 10,  # pick_team
-            'G': 10,  # pick_side
-            'H': 12,  # confidence_level
-            'I': 15,  # edge_score_total
-            'J': 18,  # projected_margin_home
-            'K': 12,  # home_win_prob
-            'L': 12,  # away_win_prob
-            'M': 40,  # top_5_factors
-            'N': 15,  # data_confidence
-            'O': 14,  # actual_winner
-            'P': 10,  # correct
-            'Q': 20,  # notes
-        }
-        for col, width in column_widths.items():
-            picks_sheet.column_dimensions[col].width = width
-        
-        # Create Summary sheet
-        summary_sheet = wb.create_sheet(SUMMARY_SHEET)
-        self._initialize_summary_sheet(summary_sheet)
+        # Create SETTINGS sheet
+        settings_sheet = wb.create_sheet(SETTINGS_SHEET)
+        self._initialize_settings_sheet(settings_sheet)
         
         return wb
     
-    def _initialize_summary_sheet(self, sheet):
-        """Initialize the Summary sheet structure."""
-        # Title
-        sheet['A1'] = "NBA Engine Performance Summary"
-        sheet['A1'].font = Font(bold=True, size=14)
+    def _initialize_log_sheet(self, sheet):
+        """Initialize the LOG sheet with headers and formatting."""
+        # Add header row with styling
+        for col_idx, header in enumerate(LOG_COLUMNS, 1):
+            cell = sheet.cell(row=1, column=col_idx, value=header)
+            cell.font = HEADER_FONT
+            cell.fill = HEADER_FILL
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = THIN_BORDER
         
-        # Overall section
-        sheet['A3'] = "OVERALL PERFORMANCE"
-        sheet['A3'].font = Font(bold=True)
-        
-        sheet['A4'] = "Total Graded Picks:"
-        sheet['A5'] = "Wins:"
-        sheet['A6'] = "Losses:"
-        sheet['A7'] = "Win %:"
-        
-        # By confidence section
-        sheet['A9'] = "BY CONFIDENCE LEVEL"
-        sheet['A9'].font = Font(bold=True)
-        
-        # HIGH
-        sheet['A11'] = "HIGH Confidence"
-        sheet['A11'].font = Font(bold=True)
-        sheet['A12'] = "Graded:"
-        sheet['A13'] = "Wins:"
-        sheet['A14'] = "Losses:"
-        sheet['A15'] = "Win %:"
-        
-        # MEDIUM
-        sheet['A17'] = "MEDIUM Confidence"
-        sheet['A17'].font = Font(bold=True)
-        sheet['A18'] = "Graded:"
-        sheet['A19'] = "Wins:"
-        sheet['A20'] = "Losses:"
-        sheet['A21'] = "Win %:"
-        
-        # LOW
-        sheet['A23'] = "LOW Confidence"
-        sheet['A23'].font = Font(bold=True)
-        sheet['A24'] = "Graded:"
-        sheet['A25'] = "Wins:"
-        sheet['A26'] = "Losses:"
-        sheet['A27'] = "Win %:"
-        
-        # Pending section
-        sheet['A29'] = "PENDING (No Result Yet)"
-        sheet['A29'].font = Font(bold=True)
-        sheet['A30'] = "Total Pending:"
-        sheet['A31'] = "HIGH Pending:"
-        sheet['A32'] = "MEDIUM Pending:"
-        sheet['A33'] = "LOW Pending:"
-        
-        # Last updated
-        sheet['A35'] = "Last Updated:"
+        # Freeze header row
+        sheet.freeze_panes = 'A2'
         
         # Set column widths
-        sheet.column_dimensions['A'].width = 25
+        column_widths = {
+            'A': 12,   # Date
+            'B': 12,   # Game_ID
+            'C': 8,    # Away
+            'D': 8,    # Home
+            'E': 8,    # Pick
+            'F': 8,    # Side
+            'G': 10,   # Conf_%
+            'H': 10,   # Bucket
+            'I': 12,   # Model_Prob
+            'J': 10,   # Edge
+            'K': 12,   # Away_Score
+            'L': 12,   # Home_Score
+            'M': 10,   # Result
+            'N': 25,   # Notes
+        }
+        for col, width in column_widths.items():
+            sheet.column_dimensions[col].width = width
+        
+        # Set row height for header
+        sheet.row_dimensions[1].height = 25
+        
+        # Add data validation for Result column (W or L only)
+        result_dv = DataValidation(
+            type="list",
+            formula1='"W,L"',
+            allow_blank=True
+        )
+        result_dv.error = "Please enter W or L"
+        result_dv.errorTitle = "Invalid Result"
+        sheet.add_data_validation(result_dv)
+        result_dv.add('M2:M1000')
+        
+        # Enable auto-filter
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(LOG_COLUMNS))}1"
+    
+    def _initialize_stats_sheet(self, sheet):
+        """Initialize the STATS sheet with formulas pulling from LOG."""
+        # Title styling
+        title_font = Font(bold=True, size=16, color="4472C4")
+        section_font = Font(bold=True, size=12, color="4472C4")
+        label_font = Font(size=11)
+        value_font = Font(size=11, bold=True)
+        
+        # Title
+        sheet['A1'] = "NBA Engine Performance Dashboard"
+        sheet['A1'].font = title_font
+        sheet.merge_cells('A1:D1')
+        
+        sheet['A2'] = f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        sheet['A2'].font = Font(size=10, italic=True, color="666666")
+        
+        # Overall Performance Section
+        sheet['A4'] = "OVERALL PERFORMANCE"
+        sheet['A4'].font = section_font
+        
+        labels = [
+            ('A5', 'Total Picks:'),
+            ('A6', 'Graded:'),
+            ('A7', 'Wins:'),
+            ('A8', 'Losses:'),
+            ('A9', 'Win Rate:'),
+            ('A10', 'Pending:'),
+        ]
+        for cell, label in labels:
+            sheet[cell] = label
+            sheet[cell].font = label_font
+        
+        # Formulas for overall stats (reference LOG sheet)
+        sheet['B5'] = '=COUNTA(LOG!A:A)-1'  # Total picks
+        sheet['B6'] = '=COUNTIF(LOG!M:M,"W")+COUNTIF(LOG!M:M,"L")'  # Graded
+        sheet['B7'] = '=COUNTIF(LOG!M:M,"W")'  # Wins
+        sheet['B8'] = '=COUNTIF(LOG!M:M,"L")'  # Losses
+        sheet['B9'] = '=IF(B6>0,B7/B6,0)'  # Win Rate
+        sheet['B9'].number_format = '0.0%'
+        sheet['B10'] = '=B5-B6'  # Pending
+        
+        for row in range(5, 11):
+            sheet[f'B{row}'].font = value_font
+        
+        # By Bucket Section
+        sheet['A12'] = "BY CONFIDENCE BUCKET"
+        sheet['A12'].font = section_font
+        
+        # Headers
+        headers = ['Bucket', 'Total', 'Graded', 'Wins', 'Losses', 'Win %', 'Pending']
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=13, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+            cell.alignment = Alignment(horizontal='center')
+        
+        # HIGH row
+        sheet['A14'] = 'HIGH'
+        sheet['A14'].font = COLORS['high_font']
+        sheet['A14'].fill = COLORS['high_fill']
+        sheet['B14'] = '=COUNTIF(LOG!H:H,"HIGH")'
+        sheet['C14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!M:M<>""))'
+        sheet['D14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!M:M="W"))'
+        sheet['E14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!M:M="L"))'
+        sheet['F14'] = '=IF(C14>0,D14/C14,0)'
+        sheet['F14'].number_format = '0.0%'
+        sheet['G14'] = '=B14-C14'
+        
+        # MED row
+        sheet['A15'] = 'MEDIUM'
+        sheet['A15'].font = COLORS['med_font']
+        sheet['A15'].fill = COLORS['med_fill']
+        sheet['B15'] = '=COUNTIF(LOG!H:H,"MED")+COUNTIF(LOG!H:H,"MEDIUM")'
+        sheet['C15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!M:M<>""))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!M:M<>""))'
+        sheet['D15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!M:M="W"))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!M:M="W"))'
+        sheet['E15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!M:M="L"))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!M:M="L"))'
+        sheet['F15'] = '=IF(C15>0,D15/C15,0)'
+        sheet['F15'].number_format = '0.0%'
+        sheet['G15'] = '=B15-C15'
+        
+        # LOW row
+        sheet['A16'] = 'LOW'
+        sheet['A16'].font = COLORS['low_font']
+        sheet['A16'].fill = COLORS['low_fill']
+        sheet['B16'] = '=COUNTIF(LOG!H:H,"LOW")'
+        sheet['C16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!M:M<>""))'
+        sheet['D16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!M:M="W"))'
+        sheet['E16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!M:M="L"))'
+        sheet['F16'] = '=IF(C16>0,D16/C16,0)'
+        sheet['F16'].number_format = '0.0%'
+        sheet['G16'] = '=B16-C16'
+        
+        # Center align all data cells
+        for row in range(14, 17):
+            for col in range(1, 8):
+                sheet.cell(row=row, column=col).alignment = Alignment(horizontal='center')
+        
+        # Column widths
+        sheet.column_dimensions['A'].width = 12
+        sheet.column_dimensions['B'].width = 10
+        sheet.column_dimensions['C'].width = 10
+        sheet.column_dimensions['D'].width = 10
+        sheet.column_dimensions['E'].width = 10
+        sheet.column_dimensions['F'].width = 10
+        sheet.column_dimensions['G'].width = 10
+        
+        # Recent Performance Section
+        sheet['A18'] = "QUICK STATS"
+        sheet['A18'].font = section_font
+        
+        sheet['A19'] = "Today's Picks:"
+        sheet['B19'] = f'=COUNTIF(LOG!A:A,"{datetime.now().strftime("%Y-%m-%d")}")'
+        sheet['A20'] = "This Week:"
+        sheet['B20'] = '=COUNTIF(LOG!A:A,">="&TODAY()-7)'
+    
+    def _initialize_settings_sheet(self, sheet):
+        """Initialize the SETTINGS sheet with configuration."""
+        sheet['A1'] = "NBA Engine Configuration"
+        sheet['A1'].font = Font(bold=True, size=14)
+        
+        sheet['A3'] = "Confidence Thresholds"
+        sheet['A3'].font = Font(bold=True)
+        
+        sheet['A4'] = "HIGH minimum:"
+        sheet['B4'] = 65.0
+        sheet['C4'] = "%(confidence >= this is HIGH)"
+        
+        sheet['A5'] = "MEDIUM minimum:"
+        sheet['B5'] = 57.5
+        sheet['C5'] = "%(confidence >= this is MEDIUM, else LOW)"
+        
+        sheet['A7'] = "Version Info"
+        sheet['A7'].font = Font(bold=True)
+        sheet['A8'] = "Engine Version:"
+        sheet['B8'] = "v3.1"
+        sheet['A9'] = "Tracker Version:"
+        sheet['B9'] = "2.0"
+        sheet['A10'] = "Created:"
+        sheet['B10'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Column widths
+        sheet.column_dimensions['A'].width = 20
         sheet.column_dimensions['B'].width = 15
+        sheet.column_dimensions['C'].width = 40
+    
+    def _apply_log_formatting(self, sheet, data_start: int, data_end: int):
+        """Apply conditional formatting and styling to LOG data rows."""
+        if data_end < data_start:
+            return
+        
+        # Bucket column conditional formatting (column H)
+        bucket_col = 'H'
+        
+        # HIGH - green
+        sheet.conditional_formatting.add(
+            f'{bucket_col}{data_start}:{bucket_col}{data_end}',
+            FormulaRule(
+                formula=[f'{bucket_col}{data_start}="HIGH"'],
+                fill=COLORS['high_fill'],
+                font=COLORS['high_font']
+            )
+        )
+        
+        # MED/MEDIUM - yellow
+        sheet.conditional_formatting.add(
+            f'{bucket_col}{data_start}:{bucket_col}{data_end}',
+            FormulaRule(
+                formula=[f'OR({bucket_col}{data_start}="MED",{bucket_col}{data_start}="MEDIUM")'],
+                fill=COLORS['med_fill'],
+                font=COLORS['med_font']
+            )
+        )
+        
+        # LOW - red
+        sheet.conditional_formatting.add(
+            f'{bucket_col}{data_start}:{bucket_col}{data_end}',
+            FormulaRule(
+                formula=[f'{bucket_col}{data_start}="LOW"'],
+                fill=COLORS['low_fill'],
+                font=COLORS['low_font']
+            )
+        )
+        
+        # Result column conditional formatting (column M)
+        result_col = 'M'
+        
+        # W - green
+        sheet.conditional_formatting.add(
+            f'{result_col}{data_start}:{result_col}{data_end}',
+            FormulaRule(
+                formula=[f'{result_col}{data_start}="W"'],
+                fill=COLORS['win_fill'],
+                font=Font(color="006100", bold=True)
+            )
+        )
+        
+        # L - red
+        sheet.conditional_formatting.add(
+            f'{result_col}{data_start}:{result_col}{data_end}',
+            FormulaRule(
+                formula=[f'{result_col}{data_start}="L"'],
+                fill=COLORS['loss_fill'],
+                font=Font(color="9C0006", bold=True)
+            )
+        )
+        
+        # Apply row styling
+        for row_idx in range(data_start, data_end + 1):
+            # Alternate row background
+            if row_idx % 2 == 0:
+                for col_idx in range(1, len(LOG_COLUMNS) + 1):
+                    cell = sheet.cell(row=row_idx, column=col_idx)
+                    if cell.fill.start_color.rgb == '00000000' or cell.fill.start_color.rgb is None:
+                        cell.fill = COLORS['alt_row_fill']
+            
+            # Center align team columns
+            for col in ['C', 'D', 'E', 'F', 'H', 'M']:
+                col_idx = ord(col) - ord('A') + 1
+                sheet.cell(row=row_idx, column=col_idx).alignment = Alignment(horizontal='center')
+            
+            # Right align numeric columns
+            for col in ['G', 'I', 'J', 'K', 'L']:
+                col_idx = ord(col) - ord('A') + 1
+                sheet.cell(row=row_idx, column=col_idx).alignment = Alignment(horizontal='right')
+            
+            # Format confidence % with 1 decimal
+            sheet.cell(row=row_idx, column=7).number_format = '0.0'
+            
+            # Format model prob with 3 decimals
+            sheet.cell(row=row_idx, column=9).number_format = '0.000'
     
     def _load_or_create_workbook(self) -> Workbook:
         """Load existing workbook or create new one."""
@@ -280,10 +502,10 @@ class ExcelTracker:
     
     def save_predictions(self, picks: List[PickEntry]) -> int:
         """
-        Save predictions to the Picks sheet.
+        Save predictions to the LOG sheet.
         
         Implements OVERWRITE-BY-DAY rule:
-        - Deletes all rows where run_date == today's date
+        - Deletes all rows where Date == today's date
         - Appends new predictions at the bottom
         
         Args:
@@ -303,57 +525,50 @@ class ExcelTracker:
         except IOError as e:
             raise e
         
-        picks_sheet = wb[PICKS_SHEET]
+        # Ensure LOG sheet exists
+        if LOG_SHEET not in wb.sheetnames:
+            log_sheet = wb.create_sheet(LOG_SHEET, 0)
+            self._initialize_log_sheet(log_sheet)
+        else:
+            log_sheet = wb[LOG_SHEET]
         
         # Find and delete all rows for today's date
         rows_to_delete = []
-        for row_idx in range(2, picks_sheet.max_row + 1):
-            cell_value = picks_sheet.cell(row=row_idx, column=1).value
+        for row_idx in range(2, log_sheet.max_row + 1):
+            cell_value = log_sheet.cell(row=row_idx, column=1).value
             if cell_value == today:
                 rows_to_delete.append(row_idx)
         
         # Delete rows in reverse order to maintain indices
         for row_idx in reversed(rows_to_delete):
-            picks_sheet.delete_rows(row_idx)
+            log_sheet.delete_rows(row_idx)
         
         # Find the next available row
-        next_row = picks_sheet.max_row + 1
+        next_row = log_sheet.max_row + 1
         if next_row == 1:  # Empty sheet (only header exists but max_row is 1)
             next_row = 2
+        
+        data_start = next_row
         
         # Append new predictions
         for pick in picks:
             row_data = pick.to_row(next_row)
             for col_idx, value in enumerate(row_data, 1):
-                cell = picks_sheet.cell(row=next_row, column=col_idx, value=value)
-                cell.alignment = Alignment(horizontal='center')
+                cell = log_sheet.cell(row=next_row, column=col_idx, value=value)
+                cell.border = THIN_BORDER
             next_row += 1
         
-        # Add conditional formatting for correct column (P)
-        # Find the range of data rows
-        data_start = 2
-        data_end = picks_sheet.max_row
+        data_end = next_row - 1
         
-        if data_end >= data_start:
-            # Green for correct (=1)
-            picks_sheet.conditional_formatting.add(
-                f'P{data_start}:P{data_end}',
-                FormulaRule(
-                    formula=['P2=1'],
-                    fill=GREEN_FILL
-                )
-            )
-            # Red for incorrect (=0)
-            picks_sheet.conditional_formatting.add(
-                f'P{data_start}:P{data_end}',
-                FormulaRule(
-                    formula=['P2=0'],
-                    fill=RED_FILL
-                )
-            )
+        # Apply formatting to new rows
+        self._apply_log_formatting(log_sheet, data_start, data_end)
         
         # Update auto-filter range
-        picks_sheet.auto_filter.ref = f"A1:{get_column_letter(len(PICKS_COLUMNS))}{picks_sheet.max_row}"
+        log_sheet.auto_filter.ref = f"A1:{get_column_letter(len(LOG_COLUMNS))}{log_sheet.max_row}"
+        
+        # Update STATS sheet timestamp
+        if STATS_SHEET in wb.sheetnames:
+            wb[STATS_SHEET]['A2'] = f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         # Save workbook
         try:
@@ -367,9 +582,9 @@ class ExcelTracker:
     
     def compute_winrate_stats(self) -> WinrateStats:
         """
-        Compute winrate statistics from the Picks sheet.
+        Compute winrate statistics from the LOG sheet.
         
-        Reads the Excel file, ignores rows where actual_winner is blank,
+        Reads the Excel file, ignores rows where result is blank,
         and computes stats in Python.
         
         Returns:
@@ -385,58 +600,72 @@ class ExcelTracker:
         except Exception:
             return stats
         
-        picks_sheet = wb[PICKS_SHEET]
+        if LOG_SHEET not in wb.sheetnames:
+            return stats
+        
+        log_sheet = wb[LOG_SHEET]
         
         # Process each data row
-        for row_idx in range(2, picks_sheet.max_row + 1):
-            # Get relevant columns
-            confidence = picks_sheet.cell(row=row_idx, column=8).value  # H
-            pick_team = picks_sheet.cell(row=row_idx, column=6).value   # F
-            actual_winner = picks_sheet.cell(row=row_idx, column=15).value  # O
+        for row_idx in range(2, log_sheet.max_row + 1):
+            # Get relevant columns (1-indexed: H=8 for bucket, M=13 for result, E=5 for pick)
+            bucket = log_sheet.cell(row=row_idx, column=8).value  # H - Bucket
+            pick_team = log_sheet.cell(row=row_idx, column=5).value  # E - Pick
+            result = log_sheet.cell(row=row_idx, column=13).value  # M - Result
             
-            if not confidence or not pick_team:
+            if not bucket or not pick_team:
                 continue
             
-            confidence = str(confidence).upper()
+            bucket = str(bucket).upper()
+            
+            # Normalize bucket name
+            if bucket == "MEDIUM":
+                bucket = "MED"
+            
+            # Count by bucket
+            if bucket == "HIGH":
+                stats.total_high += 1
+            elif bucket == "MED":
+                stats.total_medium += 1
+            elif bucket == "LOW":
+                stats.total_low += 1
             
             # Check if graded or pending
-            if actual_winner and str(actual_winner).strip():
-                # Graded pick
-                is_correct = str(actual_winner).strip().upper() == str(pick_team).strip().upper()
+            if result and str(result).strip().upper() in ['W', 'L']:
+                is_win = str(result).strip().upper() == 'W'
                 
                 stats.total_graded += 1
-                if is_correct:
+                if is_win:
                     stats.wins += 1
                 else:
                     stats.losses += 1
                 
-                # By confidence
-                if confidence == "HIGH":
+                # By bucket
+                if bucket == "HIGH":
                     stats.high_graded += 1
-                    if is_correct:
+                    if is_win:
                         stats.high_wins += 1
                     else:
                         stats.high_losses += 1
-                elif confidence == "MEDIUM":
+                elif bucket == "MED":
                     stats.medium_graded += 1
-                    if is_correct:
+                    if is_win:
                         stats.medium_wins += 1
                     else:
                         stats.medium_losses += 1
-                elif confidence == "LOW":
+                elif bucket == "LOW":
                     stats.low_graded += 1
-                    if is_correct:
+                    if is_win:
                         stats.low_wins += 1
                     else:
                         stats.low_losses += 1
             else:
                 # Pending pick
                 stats.pending_total += 1
-                if confidence == "HIGH":
+                if bucket == "HIGH":
                     stats.pending_high += 1
-                elif confidence == "MEDIUM":
+                elif bucket == "MED":
                     stats.pending_medium += 1
-                elif confidence == "LOW":
+                elif bucket == "LOW":
                     stats.pending_low += 1
         
         # Calculate win percentages
@@ -454,14 +683,11 @@ class ExcelTracker:
     
     def update_summary_sheet(self, stats: WinrateStats = None):
         """
-        Update the Summary sheet with computed statistics.
+        Update the STATS sheet timestamp.
         
-        Args:
-            stats: Pre-computed stats, or None to compute fresh
+        Note: STATS sheet uses formulas to pull data from LOG,
+        so we just need to update the timestamp.
         """
-        if stats is None:
-            stats = self.compute_winrate_stats()
-        
         if not self.file_path.exists():
             return
         
@@ -470,40 +696,8 @@ class ExcelTracker:
         except Exception:
             return
         
-        summary_sheet = wb[SUMMARY_SHEET]
-        
-        # Overall
-        summary_sheet['B4'] = stats.total_graded
-        summary_sheet['B5'] = stats.wins
-        summary_sheet['B6'] = stats.losses
-        summary_sheet['B7'] = f"{stats.win_pct:.1f}%" if stats.total_graded > 0 else "N/A"
-        
-        # HIGH
-        summary_sheet['B12'] = stats.high_graded
-        summary_sheet['B13'] = stats.high_wins
-        summary_sheet['B14'] = stats.high_losses
-        summary_sheet['B15'] = f"{stats.high_win_pct:.1f}%" if stats.high_graded > 0 else "N/A"
-        
-        # MEDIUM
-        summary_sheet['B18'] = stats.medium_graded
-        summary_sheet['B19'] = stats.medium_wins
-        summary_sheet['B20'] = stats.medium_losses
-        summary_sheet['B21'] = f"{stats.medium_win_pct:.1f}%" if stats.medium_graded > 0 else "N/A"
-        
-        # LOW
-        summary_sheet['B24'] = stats.low_graded
-        summary_sheet['B25'] = stats.low_wins
-        summary_sheet['B26'] = stats.low_losses
-        summary_sheet['B27'] = f"{stats.low_win_pct:.1f}%" if stats.low_graded > 0 else "N/A"
-        
-        # Pending
-        summary_sheet['B30'] = stats.pending_total
-        summary_sheet['B31'] = stats.pending_high
-        summary_sheet['B32'] = stats.pending_medium
-        summary_sheet['B33'] = stats.pending_low
-        
-        # Last updated
-        summary_sheet['B35'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if STATS_SHEET in wb.sheetnames:
+            wb[STATS_SHEET]['A2'] = f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         try:
             wb.save(self.file_path)

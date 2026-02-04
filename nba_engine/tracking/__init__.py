@@ -5,6 +5,9 @@ from .excel_tracker import (
     PickEntry,
     WinrateStats,
     TRACKING_FILE_PATH,
+    LOG_SHEET,
+    STATS_SHEET,
+    SETTINGS_SHEET,
 )
 
 __all__ = [
@@ -12,4 +15,7 @@ __all__ = [
     "PickEntry",
     "WinrateStats",
     "TRACKING_FILE_PATH",
+    "LOG_SHEET",
+    "STATS_SHEET",
+    "SETTINGS_SHEET",
 ]
