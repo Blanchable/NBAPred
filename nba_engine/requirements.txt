@@ -3,5 +3,6 @@ requests
 pdfplumber
 pandas
 python-dateutil
+pytz
 tqdm
 pyinstaller
