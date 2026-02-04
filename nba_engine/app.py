@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-NBA Prediction Engine v3 - GUI Application
+NBA Prediction Engine v3.1 - Modern GUI Application
 
 Features:
 - Run today's predictions with one click
 - Excel tracking with overwrite-by-day
+- Confidence % and Bucket display
 - Winrate dashboard by confidence level
-- Manual result entry via Excel file
+- Modern, clean UI design
 
 NOTE: This engine ONLY supports today's slate. No historical modes.
 """
@@ -19,15 +20,44 @@ from datetime import datetime
 from pathlib import Path
 
 
+# Try to use ttkbootstrap for modern styling, fallback to plain ttk
+try:
+    import ttkbootstrap as ttkb
+    from ttkbootstrap.constants import *
+    HAS_BOOTSTRAP = True
+except ImportError:
+    HAS_BOOTSTRAP = False
+
+
+# Color scheme
+COLORS = {
+    'bg': '#f5f6fa',
+    'card_bg': '#ffffff',
+    'primary': '#4472C4',
+    'success': '#27ae60',
+    'warning': '#f39c12',
+    'danger': '#e74c3c',
+    'text': '#2c3e50',
+    'text_muted': '#7f8c8d',
+    'border': '#dcdde1',
+    'high': '#27ae60',
+    'medium': '#f39c12', 
+    'low': '#e74c3c',
+}
+
+
 class NBAPredictor(tk.Tk):
     """Main application window for NBA Prediction Engine."""
     
     def __init__(self):
         super().__init__()
         
-        self.title("NBA Prediction Engine v3")
-        self.geometry("1200x800")
-        self.minsize(1000, 700)
+        self.title("NBA Prediction Engine v3.1")
+        self.geometry("1400x900")
+        self.minsize(1200, 800)
+        
+        # Set background color
+        self.configure(bg=COLORS['bg'])
         
         # Data storage
         self.scores = []
@@ -44,217 +74,467 @@ class NBAPredictor(tk.Tk):
         self.refresh_winrates()
     
     def setup_styles(self):
-        """Configure ttk styles."""
+        """Configure ttk styles for modern appearance."""
         style = ttk.Style()
         
-        # Main button style
+        # Try to use a cleaner theme
+        available_themes = style.theme_names()
+        for theme in ['clam', 'alt', 'default']:
+            if theme in available_themes:
+                style.theme_use(theme)
+                break
+        
+        # Configure general frame background
+        style.configure('TFrame', background=COLORS['bg'])
+        style.configure('Card.TFrame', background=COLORS['card_bg'])
+        
+        # Header style
         style.configure(
-            'Main.TButton',
-            font=('Segoe UI', 11, 'bold'),
-            padding=(15, 8)
+            'Header.TLabel',
+            font=('Segoe UI', 20, 'bold'),
+            foreground=COLORS['primary'],
+            background=COLORS['bg'],
         )
         
-        # Secondary button style
+        # Subheader style
         style.configure(
-            'Secondary.TButton',
+            'Subheader.TLabel',
+            font=('Segoe UI', 14, 'bold'),
+            foreground=COLORS['text'],
+            background=COLORS['card_bg'],
+        )
+        
+        # Normal label
+        style.configure(
+            'TLabel',
             font=('Segoe UI', 10),
-            padding=(10, 5)
+            background=COLORS['bg'],
+        )
+        
+        # Card label
+        style.configure(
+            'Card.TLabel',
+            font=('Segoe UI', 10),
+            background=COLORS['card_bg'],
         )
         
         # Status label
         style.configure(
             'Status.TLabel',
             font=('Segoe UI', 10),
-            foreground='#666666'
+            foreground=COLORS['text_muted'],
+            background=COLORS['bg'],
         )
         
-        # Winrate display
+        # Large stat number
         style.configure(
-            'Winrate.TLabel',
+            'StatNumber.TLabel',
+            font=('Segoe UI', 24, 'bold'),
+            background=COLORS['card_bg'],
+        )
+        
+        # Stat label
+        style.configure(
+            'StatLabel.TLabel',
+            font=('Segoe UI', 9),
+            foreground=COLORS['text_muted'],
+            background=COLORS['card_bg'],
+        )
+        
+        # Primary button
+        style.configure(
+            'Primary.TButton',
             font=('Segoe UI', 11, 'bold'),
+            padding=(20, 12),
         )
         
-        # Header
+        # Secondary button
         style.configure(
-            'Header.TLabel',
-            font=('Segoe UI', 14, 'bold'),
+            'Secondary.TButton',
+            font=('Segoe UI', 10),
+            padding=(15, 8),
+        )
+        
+        # Confidence bucket styles
+        style.configure(
+            'High.TLabel',
+            font=('Segoe UI', 10, 'bold'),
+            foreground='#ffffff',
+            background=COLORS['high'],
+        )
+        style.configure(
+            'Medium.TLabel',
+            font=('Segoe UI', 10, 'bold'),
+            foreground='#ffffff',
+            background=COLORS['medium'],
+        )
+        style.configure(
+            'Low.TLabel',
+            font=('Segoe UI', 10, 'bold'),
+            foreground='#ffffff',
+            background=COLORS['low'],
+        )
+        
+        # Treeview styling
+        style.configure(
+            'Treeview',
+            font=('Segoe UI', 10),
+            rowheight=28,
+            background=COLORS['card_bg'],
+            fieldbackground=COLORS['card_bg'],
+        )
+        style.configure(
+            'Treeview.Heading',
+            font=('Segoe UI', 10, 'bold'),
+            background=COLORS['primary'],
+            foreground='white',
+        )
+        style.map('Treeview',
+            background=[('selected', COLORS['primary'])],
+            foreground=[('selected', 'white')]
         )
     
     def create_widgets(self):
-        """Create all UI widgets."""
-        # Main container
-        self.main_frame = ttk.Frame(self, padding=10)
+        """Create all UI widgets with modern layout."""
+        # Main container with padding
+        self.main_frame = ttk.Frame(self, padding=20, style='TFrame')
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Header frame
-        header_frame = ttk.Frame(self.main_frame)
-        header_frame.pack(fill=tk.X, pady=(0, 10))
+        # Top bar
+        self.create_top_bar()
+        
+        # Content area (two columns)
+        content_frame = ttk.Frame(self.main_frame, style='TFrame')
+        content_frame.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
+        
+        # Left column - Summary cards
+        self.create_left_column(content_frame)
+        
+        # Right column - Tabs
+        self.create_right_column(content_frame)
+    
+    def create_top_bar(self):
+        """Create the top bar with title and actions."""
+        top_frame = ttk.Frame(self.main_frame, style='TFrame')
+        top_frame.pack(fill=tk.X)
+        
+        # Left side - Title and date
+        left_frame = ttk.Frame(top_frame, style='TFrame')
+        left_frame.pack(side=tk.LEFT)
         
         ttk.Label(
-            header_frame,
-            text="NBA Prediction Engine v3",
+            left_frame,
+            text="NBA Prediction Engine",
             style='Header.TLabel'
         ).pack(side=tk.LEFT)
         
-        # Date display
+        # Version badge
+        version_frame = tk.Frame(left_frame, bg=COLORS['primary'], padx=8, pady=2)
+        version_frame.pack(side=tk.LEFT, padx=(10, 0))
+        tk.Label(
+            version_frame,
+            text="v3.1",
+            font=('Segoe UI', 9, 'bold'),
+            fg='white',
+            bg=COLORS['primary']
+        ).pack()
+        
+        # Date
         self.date_var = tk.StringVar(value=datetime.now().strftime("%A, %B %d, %Y"))
         ttk.Label(
-            header_frame,
+            left_frame,
             textvariable=self.date_var,
             style='Status.TLabel'
-        ).pack(side=tk.RIGHT)
+        ).pack(side=tk.LEFT, padx=(20, 0))
         
-        # Button frame
-        button_frame = ttk.Frame(self.main_frame)
-        button_frame.pack(fill=tk.X, pady=10)
+        # Right side - Actions
+        right_frame = ttk.Frame(top_frame, style='TFrame')
+        right_frame.pack(side=tk.RIGHT)
         
-        # Run button
-        self.run_button = ttk.Button(
-            button_frame,
-            text="▶ Run Today's Predictions",
-            command=self.start_prediction_run,
-            style='Main.TButton'
-        )
-        self.run_button.pack(side=tk.LEFT, padx=5)
+        # Status
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(
+            right_frame,
+            textvariable=self.status_var,
+            style='Status.TLabel'
+        ).pack(side=tk.LEFT, padx=(0, 15))
         
-        # Refresh winrates button
-        self.refresh_button = ttk.Button(
-            button_frame,
-            text="🔄 Refresh Winrates",
-            command=self.refresh_winrates,
-            style='Secondary.TButton'
-        )
-        self.refresh_button.pack(side=tk.LEFT, padx=5)
-        
-        # Open Excel button
+        # Buttons
         self.open_excel_button = ttk.Button(
-            button_frame,
-            text="📂 Open Tracking File",
+            right_frame,
+            text="📂 Open Tracking",
             command=self.open_tracking_file,
             style='Secondary.TButton'
         )
         self.open_excel_button.pack(side=tk.LEFT, padx=5)
         
-        # Status label
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(
-            button_frame,
-            textvariable=self.status_var,
-            style='Status.TLabel'
-        ).pack(side=tk.RIGHT, padx=10)
+        self.refresh_button = ttk.Button(
+            right_frame,
+            text="🔄 Refresh Stats",
+            command=self.refresh_winrates,
+            style='Secondary.TButton'
+        )
+        self.refresh_button.pack(side=tk.LEFT, padx=5)
         
-        # Winrate display frame
-        winrate_frame = ttk.LabelFrame(self.main_frame, text="Performance Dashboard", padding=10)
-        winrate_frame.pack(fill=tk.X, pady=10)
+        self.run_button = ttk.Button(
+            right_frame,
+            text="▶ Run Predictions",
+            command=self.start_prediction_run,
+            style='Primary.TButton'
+        )
+        self.run_button.pack(side=tk.LEFT, padx=(5, 0))
+    
+    def create_left_column(self, parent):
+        """Create the left column with summary cards."""
+        left_frame = ttk.Frame(parent, style='TFrame', width=280)
+        left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 15))
+        left_frame.pack_propagate(False)
         
-        # Overall winrate
-        overall_frame = ttk.Frame(winrate_frame)
-        overall_frame.pack(side=tk.LEFT, padx=20)
+        # Today's Games Card
+        self.create_card(
+            left_frame,
+            "Today's Games",
+            self.create_games_summary
+        )
         
-        ttk.Label(overall_frame, text="OVERALL", style='Winrate.TLabel').pack()
+        # Confidence Distribution Card
+        self.create_card(
+            left_frame,
+            "Confidence Distribution",
+            self.create_confidence_summary
+        )
+        
+        # Performance Card
+        self.create_card(
+            left_frame,
+            "Win Rate by Bucket",
+            self.create_performance_summary
+        )
+    
+    def create_card(self, parent, title, content_func):
+        """Create a styled card with title and content."""
+        # Card container
+        card = tk.Frame(parent, bg=COLORS['card_bg'], padx=15, pady=15)
+        card.pack(fill=tk.X, pady=(0, 10))
+        
+        # Add subtle border effect
+        card.configure(highlightbackground=COLORS['border'], highlightthickness=1)
+        
+        # Title
+        tk.Label(
+            card,
+            text=title,
+            font=('Segoe UI', 12, 'bold'),
+            fg=COLORS['text'],
+            bg=COLORS['card_bg'],
+            anchor='w'
+        ).pack(fill=tk.X, pady=(0, 10))
+        
+        # Content
+        content_frame = tk.Frame(card, bg=COLORS['card_bg'])
+        content_frame.pack(fill=tk.X)
+        content_func(content_frame)
+        
+        return card
+    
+    def create_games_summary(self, parent):
+        """Create today's games summary content."""
+        self.games_count_var = tk.StringVar(value="--")
+        
+        tk.Label(
+            parent,
+            textvariable=self.games_count_var,
+            font=('Segoe UI', 36, 'bold'),
+            fg=COLORS['primary'],
+            bg=COLORS['card_bg']
+        ).pack()
+        
+        tk.Label(
+            parent,
+            text="games scheduled",
+            font=('Segoe UI', 10),
+            fg=COLORS['text_muted'],
+            bg=COLORS['card_bg']
+        ).pack()
+    
+    def create_confidence_summary(self, parent):
+        """Create confidence distribution content."""
+        # HIGH
+        high_frame = tk.Frame(parent, bg=COLORS['card_bg'])
+        high_frame.pack(fill=tk.X, pady=3)
+        
+        high_badge = tk.Frame(high_frame, bg=COLORS['high'], padx=8, pady=2)
+        high_badge.pack(side=tk.LEFT)
+        tk.Label(high_badge, text="HIGH", font=('Segoe UI', 9, 'bold'), 
+                fg='white', bg=COLORS['high']).pack()
+        
+        self.high_count_var = tk.StringVar(value="0")
+        tk.Label(high_frame, textvariable=self.high_count_var, 
+                font=('Segoe UI', 11, 'bold'), fg=COLORS['text'],
+                bg=COLORS['card_bg']).pack(side=tk.RIGHT)
+        
+        # MEDIUM
+        med_frame = tk.Frame(parent, bg=COLORS['card_bg'])
+        med_frame.pack(fill=tk.X, pady=3)
+        
+        med_badge = tk.Frame(med_frame, bg=COLORS['medium'], padx=8, pady=2)
+        med_badge.pack(side=tk.LEFT)
+        tk.Label(med_badge, text="MED", font=('Segoe UI', 9, 'bold'),
+                fg='white', bg=COLORS['medium']).pack()
+        
+        self.med_count_var = tk.StringVar(value="0")
+        tk.Label(med_frame, textvariable=self.med_count_var,
+                font=('Segoe UI', 11, 'bold'), fg=COLORS['text'],
+                bg=COLORS['card_bg']).pack(side=tk.RIGHT)
+        
+        # LOW
+        low_frame = tk.Frame(parent, bg=COLORS['card_bg'])
+        low_frame.pack(fill=tk.X, pady=3)
+        
+        low_badge = tk.Frame(low_frame, bg=COLORS['low'], padx=8, pady=2)
+        low_badge.pack(side=tk.LEFT)
+        tk.Label(low_badge, text="LOW", font=('Segoe UI', 9, 'bold'),
+                fg='white', bg=COLORS['low']).pack()
+        
+        self.low_count_var = tk.StringVar(value="0")
+        tk.Label(low_frame, textvariable=self.low_count_var,
+                font=('Segoe UI', 11, 'bold'), fg=COLORS['text'],
+                bg=COLORS['card_bg']).pack(side=tk.RIGHT)
+    
+    def create_performance_summary(self, parent):
+        """Create performance summary content."""
+        # Overall
+        overall_frame = tk.Frame(parent, bg=COLORS['card_bg'])
+        overall_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(overall_frame, text="Overall", font=('Segoe UI', 10),
+                fg=COLORS['text'], bg=COLORS['card_bg']).pack(side=tk.LEFT)
+        
         self.overall_winrate_var = tk.StringVar(value="--")
-        ttk.Label(overall_frame, textvariable=self.overall_winrate_var, font=('Segoe UI', 20, 'bold')).pack()
-        self.overall_record_var = tk.StringVar(value="0-0")
-        ttk.Label(overall_frame, textvariable=self.overall_record_var, style='Status.TLabel').pack()
+        self.overall_record_var = tk.StringVar(value="(0-0)")
         
-        # HIGH confidence
-        high_frame = ttk.Frame(winrate_frame)
-        high_frame.pack(side=tk.LEFT, padx=20)
+        record_frame = tk.Frame(overall_frame, bg=COLORS['card_bg'])
+        record_frame.pack(side=tk.RIGHT)
+        tk.Label(record_frame, textvariable=self.overall_winrate_var,
+                font=('Segoe UI', 11, 'bold'), fg=COLORS['text'],
+                bg=COLORS['card_bg']).pack(side=tk.LEFT)
+        tk.Label(record_frame, textvariable=self.overall_record_var,
+                font=('Segoe UI', 9), fg=COLORS['text_muted'],
+                bg=COLORS['card_bg']).pack(side=tk.LEFT, padx=(5, 0))
         
-        ttk.Label(high_frame, text="HIGH", style='Winrate.TLabel', foreground='green').pack()
-        self.high_winrate_var = tk.StringVar(value="--")
-        ttk.Label(high_frame, textvariable=self.high_winrate_var, font=('Segoe UI', 18, 'bold'), foreground='green').pack()
-        self.high_record_var = tk.StringVar(value="0-0")
-        ttk.Label(high_frame, textvariable=self.high_record_var, style='Status.TLabel').pack()
+        # Separator
+        ttk.Separator(parent, orient='horizontal').pack(fill=tk.X, pady=8)
         
-        # MEDIUM confidence
-        medium_frame = ttk.Frame(winrate_frame)
-        medium_frame.pack(side=tk.LEFT, padx=20)
+        # HIGH
+        self._create_winrate_row(parent, "HIGH", COLORS['high'], 
+                                 'high_winrate_var', 'high_record_var')
         
-        ttk.Label(medium_frame, text="MEDIUM", style='Winrate.TLabel', foreground='#CC7700').pack()
-        self.medium_winrate_var = tk.StringVar(value="--")
-        ttk.Label(medium_frame, textvariable=self.medium_winrate_var, font=('Segoe UI', 18, 'bold'), foreground='#CC7700').pack()
-        self.medium_record_var = tk.StringVar(value="0-0")
-        ttk.Label(medium_frame, textvariable=self.medium_record_var, style='Status.TLabel').pack()
+        # MEDIUM
+        self._create_winrate_row(parent, "MED", COLORS['medium'],
+                                 'med_winrate_var', 'med_record_var')
         
-        # LOW confidence
-        low_frame = ttk.Frame(winrate_frame)
-        low_frame.pack(side=tk.LEFT, padx=20)
-        
-        ttk.Label(low_frame, text="LOW", style='Winrate.TLabel', foreground='red').pack()
-        self.low_winrate_var = tk.StringVar(value="--")
-        ttk.Label(low_frame, textvariable=self.low_winrate_var, font=('Segoe UI', 18, 'bold'), foreground='red').pack()
-        self.low_record_var = tk.StringVar(value="0-0")
-        ttk.Label(low_frame, textvariable=self.low_record_var, style='Status.TLabel').pack()
+        # LOW
+        self._create_winrate_row(parent, "LOW", COLORS['low'],
+                                 'low_winrate_var', 'low_record_var')
         
         # Pending
-        pending_frame = ttk.Frame(winrate_frame)
-        pending_frame.pack(side=tk.LEFT, padx=20)
+        pending_frame = tk.Frame(parent, bg=COLORS['card_bg'])
+        pending_frame.pack(fill=tk.X, pady=(8, 0))
         
-        ttk.Label(pending_frame, text="PENDING", style='Winrate.TLabel', foreground='#666666').pack()
+        tk.Label(pending_frame, text="Pending", font=('Segoe UI', 9),
+                fg=COLORS['text_muted'], bg=COLORS['card_bg']).pack(side=tk.LEFT)
+        
         self.pending_var = tk.StringVar(value="0")
-        ttk.Label(pending_frame, textvariable=self.pending_var, font=('Segoe UI', 18, 'bold'), foreground='#666666').pack()
-        ttk.Label(pending_frame, text="awaiting results", style='Status.TLabel').pack()
+        tk.Label(pending_frame, textvariable=self.pending_var,
+                font=('Segoe UI', 9), fg=COLORS['text_muted'],
+                bg=COLORS['card_bg']).pack(side=tk.RIGHT)
+    
+    def _create_winrate_row(self, parent, label, color, winrate_var_name, record_var_name):
+        """Create a winrate row with colored label."""
+        frame = tk.Frame(parent, bg=COLORS['card_bg'])
+        frame.pack(fill=tk.X, pady=2)
+        
+        tk.Label(frame, text=label, font=('Segoe UI', 9, 'bold'),
+                fg=color, bg=COLORS['card_bg']).pack(side=tk.LEFT)
+        
+        setattr(self, winrate_var_name, tk.StringVar(value="--"))
+        setattr(self, record_var_name, tk.StringVar(value="(0-0)"))
+        
+        record_frame = tk.Frame(frame, bg=COLORS['card_bg'])
+        record_frame.pack(side=tk.RIGHT)
+        tk.Label(record_frame, textvariable=getattr(self, winrate_var_name),
+                font=('Segoe UI', 10, 'bold'), fg=COLORS['text'],
+                bg=COLORS['card_bg']).pack(side=tk.LEFT)
+        tk.Label(record_frame, textvariable=getattr(self, record_var_name),
+                font=('Segoe UI', 9), fg=COLORS['text_muted'],
+                bg=COLORS['card_bg']).pack(side=tk.LEFT, padx=(5, 0))
+    
+    def create_right_column(self, parent):
+        """Create the right column with tabs."""
+        right_frame = ttk.Frame(parent, style='TFrame')
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # Notebook for tabs
-        self.notebook = ttk.Notebook(self.main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.notebook = ttk.Notebook(right_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
         
         # Predictions tab
-        self.predictions_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.predictions_frame, text="📊 Today's Predictions")
+        self.predictions_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.predictions_frame, text="  📊 Today's Predictions  ")
         self.create_predictions_tree()
         
         # Factors tab
-        self.factors_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.factors_frame, text="📈 Factor Breakdown")
+        self.factors_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.factors_frame, text="  📈 Factor Breakdown  ")
         self.create_factors_view()
         
         # Injuries tab
-        self.injuries_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.injuries_frame, text="🏥 Injuries")
+        self.injuries_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.injuries_frame, text="  🏥 Injuries  ")
         self.create_injuries_tree()
         
         # Log tab
-        self.log_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.log_frame, text="📝 Log")
+        self.log_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.log_frame, text="  📝 Log  ")
         self.create_log_view()
     
     def create_predictions_tree(self):
-        """Create the predictions treeview."""
+        """Create the predictions treeview with confidence display."""
+        # Container with card-like appearance
+        container = tk.Frame(self.predictions_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
         columns = (
-            'matchup', 'pick', 'side', 'confidence', 'edge', 
+            'matchup', 'pick', 'side', 'conf_pct', 'bucket', 'edge', 
             'home_prob', 'away_prob', 'margin'
         )
         
         self.pred_tree = ttk.Treeview(
-            self.predictions_frame,
+            container,
             columns=columns,
             show='headings',
             selectmode='browse'
         )
         
-        # Configure columns
-        self.pred_tree.heading('matchup', text='Matchup')
-        self.pred_tree.heading('pick', text='Pick')
-        self.pred_tree.heading('side', text='Side')
-        self.pred_tree.heading('confidence', text='Confidence')
-        self.pred_tree.heading('edge', text='Edge')
-        self.pred_tree.heading('home_prob', text='Home %')
-        self.pred_tree.heading('away_prob', text='Away %')
-        self.pred_tree.heading('margin', text='Margin')
+        # Configure columns with better widths
+        col_configs = [
+            ('matchup', 'Matchup', 130),
+            ('pick', 'Pick', 70),
+            ('side', 'Side', 70),
+            ('conf_pct', 'Conf %', 80),
+            ('bucket', 'Bucket', 80),
+            ('edge', 'Edge', 70),
+            ('home_prob', 'Home %', 80),
+            ('away_prob', 'Away %', 80),
+            ('margin', 'Margin', 80),
+        ]
         
-        self.pred_tree.column('matchup', width=150, anchor='center')
-        self.pred_tree.column('pick', width=80, anchor='center')
-        self.pred_tree.column('side', width=80, anchor='center')
-        self.pred_tree.column('confidence', width=100, anchor='center')
-        self.pred_tree.column('edge', width=80, anchor='center')
-        self.pred_tree.column('home_prob', width=80, anchor='center')
-        self.pred_tree.column('away_prob', width=80, anchor='center')
-        self.pred_tree.column('margin', width=80, anchor='center')
+        for col_id, heading, width in col_configs:
+            self.pred_tree.heading(col_id, text=heading)
+            self.pred_tree.column(col_id, width=width, anchor='center')
         
         # Scrollbar
-        scrollbar = ttk.Scrollbar(self.predictions_frame, orient=tk.VERTICAL, command=self.pred_tree.yview)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.pred_tree.yview)
         self.pred_tree.configure(yscrollcommand=scrollbar.set)
         
         self.pred_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -263,34 +543,69 @@ class NBAPredictor(tk.Tk):
         # Bind selection
         self.pred_tree.bind('<<TreeviewSelect>>', self.on_prediction_selected)
         
-        # Configure row colors
-        self.pred_tree.tag_configure('high', background='#E8F5E9')
-        self.pred_tree.tag_configure('medium', background='#FFF3E0')
-        self.pred_tree.tag_configure('low', background='#FFEBEE')
+        # Configure row tags for confidence buckets
+        self.pred_tree.tag_configure('high', background='#d4edda')
+        self.pred_tree.tag_configure('medium', background='#fff3cd')
+        self.pred_tree.tag_configure('low', background='#f8d7da')
     
     def create_factors_view(self):
-        """Create the factor breakdown view."""
-        # Game selector
-        selector_frame = ttk.Frame(self.factors_frame)
-        selector_frame.pack(fill=tk.X, pady=5)
+        """Create the factor breakdown view with confidence summary."""
+        # Container
+        container = tk.Frame(self.factors_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        ttk.Label(selector_frame, text="Select Game:").pack(side=tk.LEFT, padx=5)
+        # Top bar with game selector and confidence display
+        top_bar = tk.Frame(container, bg=COLORS['card_bg'])
+        top_bar.pack(fill=tk.X, pady=(10, 15), padx=10)
+        
+        # Game selector
+        selector_frame = tk.Frame(top_bar, bg=COLORS['card_bg'])
+        selector_frame.pack(side=tk.LEFT)
+        
+        tk.Label(selector_frame, text="Select Game:", font=('Segoe UI', 10),
+                bg=COLORS['card_bg'], fg=COLORS['text']).pack(side=tk.LEFT, padx=(0, 8))
         
         self.game_selector_var = tk.StringVar()
         self.game_selector = ttk.Combobox(
             selector_frame,
             textvariable=self.game_selector_var,
             state='readonly',
-            width=30
+            width=25,
+            font=('Segoe UI', 10)
         )
-        self.game_selector.pack(side=tk.LEFT, padx=5)
+        self.game_selector.pack(side=tk.LEFT)
         self.game_selector.bind('<<ComboboxSelected>>', self.on_game_selected)
         
+        # Confidence display (right side)
+        conf_frame = tk.Frame(top_bar, bg=COLORS['card_bg'])
+        conf_frame.pack(side=tk.RIGHT)
+        
+        tk.Label(conf_frame, text="Confidence:", font=('Segoe UI', 10),
+                bg=COLORS['card_bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        
+        self.factor_conf_var = tk.StringVar(value="--")
+        tk.Label(conf_frame, textvariable=self.factor_conf_var,
+                font=('Segoe UI', 12, 'bold'), bg=COLORS['card_bg'],
+                fg=COLORS['primary']).pack(side=tk.LEFT, padx=(5, 10))
+        
+        self.factor_bucket_frame = tk.Frame(conf_frame, bg=COLORS['card_bg'])
+        self.factor_bucket_frame.pack(side=tk.LEFT)
+        
+        self.factor_bucket_label = tk.Label(
+            self.factor_bucket_frame, text="--", 
+            font=('Segoe UI', 9, 'bold'), fg='white', bg=COLORS['text_muted'],
+            padx=8, pady=2
+        )
+        self.factor_bucket_label.pack()
+        
         # Factors tree
+        tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        
         columns = ('factor', 'weight', 'signed_value', 'contribution', 'inputs')
         
         self.factors_tree = ttk.Treeview(
-            self.factors_frame,
+            tree_frame,
             columns=columns,
             show='headings',
             selectmode='browse'
@@ -298,33 +613,36 @@ class NBAPredictor(tk.Tk):
         
         self.factors_tree.heading('factor', text='Factor')
         self.factors_tree.heading('weight', text='Weight')
-        self.factors_tree.heading('signed_value', text='Signed Value')
-        self.factors_tree.heading('contribution', text='Contribution')
+        self.factors_tree.heading('signed_value', text='Value')
+        self.factors_tree.heading('contribution', text='Contrib')
         self.factors_tree.heading('inputs', text='Inputs Used')
         
-        self.factors_tree.column('factor', width=200)
-        self.factors_tree.column('weight', width=80, anchor='center')
-        self.factors_tree.column('signed_value', width=100, anchor='center')
-        self.factors_tree.column('contribution', width=100, anchor='center')
-        self.factors_tree.column('inputs', width=400)
+        self.factors_tree.column('factor', width=180)
+        self.factors_tree.column('weight', width=70, anchor='center')
+        self.factors_tree.column('signed_value', width=90, anchor='center')
+        self.factors_tree.column('contribution', width=90, anchor='center')
+        self.factors_tree.column('inputs', width=350)
         
-        scrollbar = ttk.Scrollbar(self.factors_frame, orient=tk.VERTICAL, command=self.factors_tree.yview)
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.factors_tree.yview)
         self.factors_tree.configure(yscrollcommand=scrollbar.set)
         
         self.factors_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Color tags
-        self.factors_tree.tag_configure('positive', foreground='green')
-        self.factors_tree.tag_configure('negative', foreground='red')
-        self.factors_tree.tag_configure('neutral', foreground='gray')
+        self.factors_tree.tag_configure('positive', foreground=COLORS['success'])
+        self.factors_tree.tag_configure('negative', foreground=COLORS['danger'])
+        self.factors_tree.tag_configure('neutral', foreground=COLORS['text_muted'])
     
     def create_injuries_tree(self):
         """Create the injuries treeview."""
+        container = tk.Frame(self.injuries_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
         columns = ('team', 'player', 'status', 'reason')
         
         self.injuries_tree = ttk.Treeview(
-            self.injuries_frame,
+            container,
             columns=columns,
             show='headings',
             selectmode='browse'
@@ -340,28 +658,35 @@ class NBAPredictor(tk.Tk):
         self.injuries_tree.column('status', width=120, anchor='center')
         self.injuries_tree.column('reason', width=400)
         
-        scrollbar = ttk.Scrollbar(self.injuries_frame, orient=tk.VERTICAL, command=self.injuries_tree.yview)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.injuries_tree.yview)
         self.injuries_tree.configure(yscrollcommand=scrollbar.set)
         
         self.injuries_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Status color tags
-        self.injuries_tree.tag_configure('out', background='#FFCDD2', foreground='#B71C1C')
-        self.injuries_tree.tag_configure('doubtful', background='#FFE0B2', foreground='#E65100')
-        self.injuries_tree.tag_configure('questionable', background='#FFF9C4', foreground='#F57F17')
-        self.injuries_tree.tag_configure('probable', background='#C8E6C9', foreground='#1B5E20')
+        self.injuries_tree.tag_configure('out', background='#f8d7da', foreground='#721c24')
+        self.injuries_tree.tag_configure('doubtful', background='#fff3cd', foreground='#856404')
+        self.injuries_tree.tag_configure('questionable', background='#ffeeba', foreground='#856404')
+        self.injuries_tree.tag_configure('probable', background='#d4edda', foreground='#155724')
     
     def create_log_view(self):
         """Create the log text view."""
+        container = tk.Frame(self.log_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
         self.log_text = tk.Text(
-            self.log_frame,
+            container,
             wrap=tk.WORD,
             font=('Consolas', 10),
-            state=tk.DISABLED
+            bg=COLORS['card_bg'],
+            fg=COLORS['text'],
+            state=tk.DISABLED,
+            padx=10,
+            pady=10
         )
         
-        scrollbar = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -385,34 +710,34 @@ class NBAPredictor(tk.Tk):
             # Update overall
             if stats.total_graded > 0:
                 self.overall_winrate_var.set(f"{stats.win_pct:.1f}%")
-                self.overall_record_var.set(f"{stats.wins}-{stats.losses}")
+                self.overall_record_var.set(f"({stats.wins}-{stats.losses})")
             else:
                 self.overall_winrate_var.set("--")
-                self.overall_record_var.set("0-0")
+                self.overall_record_var.set("(0-0)")
             
             # Update HIGH
             if stats.high_graded > 0:
                 self.high_winrate_var.set(f"{stats.high_win_pct:.1f}%")
-                self.high_record_var.set(f"{stats.high_wins}-{stats.high_losses}")
+                self.high_record_var.set(f"({stats.high_wins}-{stats.high_losses})")
             else:
                 self.high_winrate_var.set("--")
-                self.high_record_var.set("0-0")
+                self.high_record_var.set("(0-0)")
             
             # Update MEDIUM
             if stats.medium_graded > 0:
-                self.medium_winrate_var.set(f"{stats.medium_win_pct:.1f}%")
-                self.medium_record_var.set(f"{stats.medium_wins}-{stats.medium_losses}")
+                self.med_winrate_var.set(f"{stats.medium_win_pct:.1f}%")
+                self.med_record_var.set(f"({stats.medium_wins}-{stats.medium_losses})")
             else:
-                self.medium_winrate_var.set("--")
-                self.medium_record_var.set("0-0")
+                self.med_winrate_var.set("--")
+                self.med_record_var.set("(0-0)")
             
             # Update LOW
             if stats.low_graded > 0:
                 self.low_winrate_var.set(f"{stats.low_win_pct:.1f}%")
-                self.low_record_var.set(f"{stats.low_wins}-{stats.low_losses}")
+                self.low_record_var.set(f"({stats.low_wins}-{stats.low_losses})")
             else:
                 self.low_winrate_var.set("--")
-                self.low_record_var.set("0-0")
+                self.low_record_var.set("(0-0)")
             
             # Update pending
             self.pending_var.set(str(stats.pending_total))
@@ -477,6 +802,9 @@ class NBAPredictor(tk.Tk):
             for game in games:
                 self.log(f"    {game.away_team} @ {game.home_team}")
             
+            # Update games count
+            self.after(0, lambda: self.games_count_var.set(str(len(games))))
+            
             # Get team stats
             self.log("\n[3/7] Fetching team statistics...")
             season = get_current_season()
@@ -487,10 +815,7 @@ class NBAPredictor(tk.Tk):
             
             if not team_strength:
                 self.log("  Warning: Using fallback stats")
-                for game in games:
-                    for team in [game.home_team, game.away_team]:
-                        if team not in team_strength:
-                            team_strength[team] = get_fallback_team_strength(team)
+                team_strength = get_fallback_team_strength()
             else:
                 self.log(f"  Loaded stats for {len(team_strength)} teams")
             
@@ -612,11 +937,21 @@ class NBAPredictor(tk.Tk):
                 score.game_id = game.game_id
                 scores.append(score)
             
-            # Sort by confidence
-            scores.sort(key=lambda s: (abs(s.edge_score_total), s.confidence), reverse=True)
+            # Sort by confidence bucket then confidence % desc
+            bucket_order = {'HIGH': 0, 'MEDIUM': 1, 'MED': 1, 'LOW': 2}
+            scores.sort(key=lambda s: (bucket_order.get(s.confidence_bucket, 2), -s.confidence_pct_value))
             self.scores = scores
             
             self.log(f"\n  Generated {len(scores)} predictions")
+            
+            # Update confidence counts
+            high_count = sum(1 for s in scores if s.confidence_bucket == 'HIGH')
+            med_count = sum(1 for s in scores if s.confidence_bucket == 'MEDIUM')
+            low_count = sum(1 for s in scores if s.confidence_bucket == 'LOW')
+            
+            self.after(0, lambda: self.high_count_var.set(str(high_count)))
+            self.after(0, lambda: self.med_count_var.set(str(med_count)))
+            self.after(0, lambda: self.low_count_var.set(str(low_count)))
             
             # Save to Excel
             self.log("\nSaving to Excel tracking...")
@@ -633,26 +968,27 @@ class NBAPredictor(tk.Tk):
             else:
                 data_confidence = "LOW"
             
-            # Create entries
+            # Create entries with new format
             entries = []
             for score in scores:
                 pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
                 
+                # Map bucket to short form for spreadsheet
+                bucket_short = score.confidence_bucket
+                if bucket_short == "MEDIUM":
+                    bucket_short = "MED"
+                
                 entry = PickEntry(
                     run_date=run_date,
-                    run_timestamp=run_timestamp,
                     game_id=getattr(score, 'game_id', ''),
                     away_team=score.away_team,
                     home_team=score.home_team,
                     pick_team=score.predicted_winner,
                     pick_side=pick_side,
-                    confidence_level=score.confidence_label.upper(),
-                    edge_score_total=round(score.edge_score_total, 2),
-                    projected_margin_home=round(score.projected_margin_home, 1),
-                    home_win_prob=round(score.home_win_prob, 3),
-                    away_win_prob=round(score.away_win_prob, 3),
-                    top_5_factors=score.top_5_factors_str,
-                    data_confidence=data_confidence,
+                    confidence_pct=score.confidence_pct_value,
+                    confidence_bucket=bucket_short,
+                    model_prob=score.confidence,
+                    edge_score=score.edge_score_total,
                 )
                 entries.append(entry)
             
@@ -692,7 +1028,7 @@ class NBAPredictor(tk.Tk):
             self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
     
     def update_predictions_display(self):
-        """Update the predictions treeview."""
+        """Update the predictions treeview with confidence display."""
         # Clear existing
         for item in self.pred_tree.get_children():
             self.pred_tree.delete(item)
@@ -701,16 +1037,19 @@ class NBAPredictor(tk.Tk):
         for score in self.scores:
             matchup = f"{score.away_team} @ {score.home_team}"
             pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
-            conf_label = score.confidence_label.upper()
+            conf_bucket = score.confidence_bucket
             
             # Determine tag
-            tag = conf_label.lower()
+            tag = conf_bucket.lower()
+            if tag == 'med':
+                tag = 'medium'
             
             self.pred_tree.insert('', tk.END, values=(
                 matchup,
                 score.predicted_winner,
                 pick_side,
-                conf_label,
+                f"{score.confidence_pct_value:.1f}%",
+                conf_bucket,
                 f"{score.edge_score_total:+.1f}",
                 f"{score.home_win_prob:.1%}",
                 f"{score.away_win_prob:.1%}",
@@ -786,6 +1125,22 @@ class NBAPredictor(tk.Tk):
         for score in self.scores:
             matchup = f"{score.away_team} @ {score.home_team}"
             if matchup == selected:
+                # Update confidence display
+                self.factor_conf_var.set(f"{score.confidence_pct_value:.1f}%")
+                
+                # Update bucket label with color
+                bucket = score.confidence_bucket
+                bucket_colors = {
+                    'HIGH': COLORS['high'],
+                    'MEDIUM': COLORS['medium'],
+                    'MED': COLORS['medium'],
+                    'LOW': COLORS['low']
+                }
+                self.factor_bucket_label.config(
+                    text=bucket,
+                    bg=bucket_colors.get(bucket, COLORS['text_muted'])
+                )
+                
                 # Display factors
                 for factor in score.factors:
                     # Determine tag
@@ -797,7 +1152,7 @@ class NBAPredictor(tk.Tk):
                         tag = 'neutral'
                     
                     self.factors_tree.insert('', tk.END, values=(
-                        factor.name,
+                        factor.display_name,
                         factor.weight,
                         f"{factor.signed_value:+.3f}",
                         f"{factor.contribution:+.2f}",
