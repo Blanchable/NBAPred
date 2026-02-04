@@ -78,19 +78,27 @@ def backfill_predictions(
         return []
     
     print(f"  Found {len(games)} games")
+    # Debug: show first 3 games
+    for i, g in enumerate(games[:3]):
+        print(f"    Game {i+1}: {g['away_team']} @ {g['home_team']} (id: {g['game_id']})")
     
     # Get as-of team stats
     print(f"\n[2/4] Fetching team stats as-of {date_str}...")
     team_stats = get_asof_team_stats(target_date, use_cache=use_cache)
     team_stats_available = len(team_stats) > 0
+    print(f"  Loaded {len(team_stats)} team stats")
     
     # Get as-of player stats
     print(f"\n[3/4] Fetching player stats as-of {date_str}...")
     player_stats = get_asof_player_stats(target_date, use_cache=use_cache)
     player_stats_available = len(player_stats) > 0
+    print(f"  Loaded player stats for {len(player_stats)} teams")
     
     # Generate predictions
     print(f"\n[4/4] Generating predictions...")
+    
+    # Track missing stats for debug
+    missing_stats_warned = set()
     predictions = []
     run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
@@ -111,7 +119,16 @@ def backfill_predictions(
         away_ts = team_stats.get(away_team)
         
         if not home_ts or not away_ts:
-            print(f"  Warning: Missing stats for {away_team} @ {home_team}")
+            # Only warn once per missing team
+            missing = []
+            if not home_ts and home_team not in missing_stats_warned:
+                missing.append(home_team)
+                missing_stats_warned.add(home_team)
+            if not away_ts and away_team not in missing_stats_warned:
+                missing.append(away_team)
+                missing_stats_warned.add(away_team)
+            if missing:
+                print(f"  Warning: Missing stats for team(s): {', '.join(missing)}")
             continue
         
         # Get player lists

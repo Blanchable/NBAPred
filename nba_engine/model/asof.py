@@ -11,7 +11,7 @@ Key principle: For date D, use only games completed before D (not including D it
 import time
 from dataclasses import dataclass, asdict
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from pathlib import Path
 
 # Import utils
@@ -20,6 +20,43 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.dates import format_date, parse_date, get_eastern_date, get_season_for_date
 from utils.storage import load_cache, save_cache
+
+
+# Retry configuration for API calls
+MAX_RETRIES = 3
+RETRY_DELAYS = [2, 4, 8]  # Exponential backoff
+
+
+def api_call_with_retry(func: Callable, *args, **kwargs) -> Any:
+    """
+    Execute an API call with retry logic.
+    
+    Args:
+        func: The function to call
+        *args: Positional arguments for func
+        **kwargs: Keyword arguments for func
+        
+    Returns:
+        Result of func
+        
+    Raises:
+        Last exception if all retries fail
+    """
+    last_exception = None
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAYS[attempt]
+                print(f"    API call failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                print(f"    API call failed after {MAX_RETRIES} attempts")
+    
+    raise last_exception
 
 
 @dataclass
@@ -382,35 +419,65 @@ def get_asof_schedule(target_date: date) -> List[Dict[str, Any]]:
     """
     try:
         from nba_api.stats.endpoints import ScoreboardV2
+        from nba_api.stats.static import teams as static_teams
     except ImportError:
         print("  Warning: nba_api not available")
         return []
     
-    date_str = format_date(target_date, "%Y-%m-%d")
+    # Log date in YYYY-MM-DD format for consistency
+    log_date = target_date.strftime("%Y-%m-%d")
+    # API expects MM/DD/YYYY format
+    api_date = target_date.strftime("%m/%d/%Y")
+    
+    # Build team ID to abbreviation mapping
+    id_to_abbrev = {t["id"]: t["abbreviation"] for t in static_teams.get_teams()}
     
     try:
         time.sleep(0.6)
-        scoreboard = ScoreboardV2(game_date=date_str)
+        
+        # Use retry logic for API call
+        def fetch_scoreboard():
+            return ScoreboardV2(game_date=api_date, timeout=60)
+        
+        scoreboard = api_call_with_retry(fetch_scoreboard)
         games_df = scoreboard.get_data_frames()[0]  # GameHeader
+        
+        print(f"  ScoreboardV2 returned {len(games_df)} games for {api_date}")
         
         games = []
         for _, row in games_df.iterrows():
-            game = {
-                'game_id': str(row.get('GAME_ID', '')),
-                'game_date': date_str,
-                'home_team': str(row.get('HOME_TEAM_ABBREVIATION', '') or row.get('HOME_TEAM', '')),
-                'away_team': str(row.get('VISITOR_TEAM_ABBREVIATION', '') or row.get('VISITOR_TEAM', '')),
-                'game_status': str(row.get('GAME_STATUS_TEXT', '')),
-            }
+            game_id = str(row.get('GAME_ID', '') or '')
             
-            # Only include if we have both teams
-            if game['home_team'] and game['away_team']:
-                games.append(game)
+            # Use team IDs and map to abbreviations
+            home_id = int(row.get('HOME_TEAM_ID', 0) or 0)
+            away_id = int(row.get('VISITOR_TEAM_ID', 0) or 0)
+            
+            home_abbrev = id_to_abbrev.get(home_id, '')
+            away_abbrev = id_to_abbrev.get(away_id, '')
+            
+            if not home_abbrev or not away_abbrev:
+                print(f"    Skipping game {game_id}: missing team mapping (home_id={home_id}, away_id={away_id})")
+                continue
+            
+            game = {
+                'game_id': game_id,
+                'game_date': log_date,
+                'home_team': home_abbrev,
+                'away_team': away_abbrev,
+                'game_status': str(row.get('GAME_STATUS_TEXT', '') or ''),
+            }
+            games.append(game)
+        
+        # Debug: print first 3 games
+        if games:
+            print(f"  Sample games: {games[:3]}")
         
         return games
         
     except Exception as e:
-        print(f"  Warning: Failed to fetch schedule for {date_str}: {e}")
+        print(f"  Warning: Failed to fetch schedule for {api_date}: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -426,15 +493,27 @@ def get_asof_game_results(target_date: date) -> Dict[str, str]:
     """
     try:
         from nba_api.stats.endpoints import ScoreboardV2
+        from nba_api.stats.static import teams as static_teams
     except ImportError:
         print("  Warning: nba_api not available")
         return {}
     
-    date_str = format_date(target_date, "%Y-%m-%d")
+    # Log date in YYYY-MM-DD format for key consistency
+    log_date = target_date.strftime("%Y-%m-%d")
+    # API expects MM/DD/YYYY format
+    api_date = target_date.strftime("%m/%d/%Y")
+    
+    # Build team ID to abbreviation mapping
+    id_to_abbrev = {t["id"]: t["abbreviation"] for t in static_teams.get_teams()}
     
     try:
         time.sleep(0.6)
-        scoreboard = ScoreboardV2(game_date=date_str)
+        
+        # Use retry logic for API call
+        def fetch_scoreboard():
+            return ScoreboardV2(game_date=api_date, timeout=60)
+        
+        scoreboard = api_call_with_retry(fetch_scoreboard)
         
         # Get game header and line score
         games_df = scoreboard.get_data_frames()[0]  # GameHeader
@@ -443,19 +522,24 @@ def get_asof_game_results(target_date: date) -> Dict[str, str]:
         results = {}
         
         for _, game_row in games_df.iterrows():
-            game_id = str(game_row.get('GAME_ID', ''))
-            home_team = str(game_row.get('HOME_TEAM_ABBREVIATION', '') or '')
-            away_team = str(game_row.get('VISITOR_TEAM_ABBREVIATION', '') or '')
-            status = str(game_row.get('GAME_STATUS_TEXT', ''))
+            game_id = str(game_row.get('GAME_ID', '') or '')
+            status = str(game_row.get('GAME_STATUS_TEXT', '') or '')
             
             # Only process Final games
             if 'Final' not in status:
                 continue
             
-            if not home_team or not away_team:
+            # Use team IDs and map to abbreviations
+            home_id = int(game_row.get('HOME_TEAM_ID', 0) or 0)
+            away_id = int(game_row.get('VISITOR_TEAM_ID', 0) or 0)
+            
+            home_abbrev = id_to_abbrev.get(home_id, '')
+            away_abbrev = id_to_abbrev.get(away_id, '')
+            
+            if not home_abbrev or not away_abbrev:
                 continue
             
-            # Get scores from LineScore
+            # Get scores from LineScore - use TEAM_ABBREVIATION which is available
             game_lines = line_df[line_df['GAME_ID'] == game_id]
             
             if len(game_lines) >= 2:
@@ -463,22 +547,27 @@ def get_asof_game_results(target_date: date) -> Dict[str, str]:
                 away_score = 0
                 
                 for _, line in game_lines.iterrows():
-                    team_abbrev = str(line.get('TEAM_ABBREVIATION', ''))
+                    team_abbrev = str(line.get('TEAM_ABBREVIATION', '') or '')
                     pts = int(line.get('PTS', 0) or 0)
                     
-                    if team_abbrev == home_team:
+                    if team_abbrev == home_abbrev:
                         home_score = pts
-                    elif team_abbrev == away_team:
+                    elif team_abbrev == away_abbrev:
                         away_score = pts
                 
-                winner = home_team if home_score > away_score else away_team
-                key = f"{date_str}|{home_team}|{away_team}"
-                results[key] = winner
+                if home_score > 0 or away_score > 0:
+                    winner = home_abbrev if home_score > away_score else away_abbrev
+                    # Key format must match what storage.update_results_in_log expects
+                    key = f"{log_date}|{home_abbrev}|{away_abbrev}"
+                    results[key] = winner
         
+        print(f"  Found {len(results)} final games for {log_date}")
         return results
         
     except Exception as e:
-        print(f"  Warning: Failed to fetch results for {date_str}: {e}")
+        print(f"  Warning: Failed to fetch results for {api_date}: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 
