@@ -16,12 +16,19 @@ env/
 *.swp
 *.swo
 
-# Generated outputs (keep folder, ignore contents)
+# Generated outputs (keep folder structure, ignore contents)
 outputs/*.csv
 outputs/*.pdf
 outputs/*.txt
+outputs/tracking/*.xlsx
 !outputs/.gitkeep
+!outputs/tracking/.gitkeep
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# PyInstaller
+build/
+dist/
+*.spec

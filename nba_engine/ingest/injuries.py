@@ -187,6 +187,50 @@ def _format_injury_url(dt: datetime) -> str:
     return f"{INJURY_REPORT_BASE_URL}{filename}"
 
 
+def find_injury_pdf_for_date(
+    target_date: datetime,
+    cutoff_time: datetime,
+    max_hours_back: int = 24,
+) -> Optional[str]:
+    """
+    Find an injury report PDF that was available at a specific cutoff time.
+    
+    Used for historical analysis to get the injury report that would have been
+    available before games started on a specific date.
+    
+    Args:
+        target_date: The date to find injury report for (used for filename)
+        cutoff_time: The latest time the report could have been published (Eastern Time)
+        max_hours_back: Maximum hours before cutoff to search
+    
+    Returns:
+        URL of the injury report, or None if not found
+    """
+    # Search backwards from cutoff_time in 15-minute increments
+    max_steps = (max_hours_back * 60) // 15
+    
+    for step in range(max_steps):
+        check_time = cutoff_time - timedelta(minutes=step * 15)
+        
+        # Only look at reports from the target date or the day before
+        if check_time.date() < target_date.date() - timedelta(days=1):
+            break
+        
+        url = _format_injury_url(check_time)
+        
+        try:
+            response = requests.head(url, timeout=REQUEST_TIMEOUT)
+            content_type = response.headers.get("Content-Type", "")
+            
+            if response.status_code == 200 and "pdf" in content_type.lower():
+                return url
+                
+        except requests.RequestException:
+            continue
+    
+    return None
+
+
 def find_latest_injury_pdf(
     max_hours_back: int = 36,
     cache_file: Optional[Path] = None,
