@@ -96,25 +96,47 @@ class NBAPredictor(tk.Tk):
         ttk.Label(header_frame, text="🏀 NBA Prediction Engine v3", style='Header.TLabel').pack(side=tk.LEFT)
         ttk.Label(header_frame, text=datetime.now().strftime("%A, %B %d, %Y"), style='SubHeader.TLabel').pack(side=tk.RIGHT, pady=10)
         
-        # Buttons
-        button_frame = ttk.Frame(self.main_frame)
-        button_frame.pack(fill=tk.X, pady=10)
+        # Buttons - Row 1: Today's predictions
+        button_frame1 = ttk.Frame(self.main_frame)
+        button_frame1.pack(fill=tk.X, pady=5)
         
-        self.fetch_button = ttk.Button(button_frame, text="🔄 Fetch Today's Predictions", command=self.start_fetch)
+        self.fetch_button = ttk.Button(button_frame1, text="🔄 Fetch Today's Predictions", command=self.start_fetch)
         self.fetch_button.pack(side=tk.LEFT)
         
-        self.save_button = ttk.Button(button_frame, text="💾 Save to CSV", command=self.save_to_csv, state=tk.DISABLED)
+        self.save_button = ttk.Button(button_frame1, text="💾 Save to CSV", command=self.save_to_csv, state=tk.DISABLED)
         self.save_button.pack(side=tk.LEFT, padx=10)
         
-        self.update_results_button = ttk.Button(button_frame, text="📊 Update Results", command=self.start_update_results)
+        self.update_results_button = ttk.Button(button_frame1, text="📊 Update Results", command=self.start_update_results)
         self.update_results_button.pack(side=tk.LEFT, padx=10)
+        
+        self.export_excel_button = ttk.Button(button_frame1, text="📋 Export to Excel", command=self.export_to_excel)
+        self.export_excel_button.pack(side=tk.LEFT, padx=10)
+        
+        self.status_var = tk.StringVar(value="Click 'Fetch Today's Predictions' to start")
+        ttk.Label(button_frame1, textvariable=self.status_var, style='Status.TLabel').pack(side=tk.RIGHT)
+        
+        # Buttons - Row 2: Historical analysis
+        button_frame2 = ttk.Frame(self.main_frame)
+        button_frame2.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(button_frame2, text="Historical Date:", style='TLabel').pack(side=tk.LEFT)
+        
+        # Date entry
+        self.date_var = tk.StringVar(value=format_date(get_eastern_date()))
+        self.date_entry = ttk.Entry(button_frame2, textvariable=self.date_var, width=12)
+        self.date_entry.pack(side=tk.LEFT, padx=5)
+        
+        self.historical_button = ttk.Button(button_frame2, text="🕐 Run Historical", command=self.start_historical)
+        self.historical_button.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(button_frame2, orient='vertical').pack(side=tk.LEFT, padx=10, fill='y')
+        
+        self.season_backfill_button = ttk.Button(button_frame2, text="📅 Full Season Backfill", command=self.start_season_backfill)
+        self.season_backfill_button.pack(side=tk.LEFT, padx=5)
         
         # Performance summary label
         self.perf_var = tk.StringVar(value="")
-        ttk.Label(button_frame, textvariable=self.perf_var, style='Status.TLabel').pack(side=tk.RIGHT, padx=20)
-        
-        self.status_var = tk.StringVar(value="Click 'Fetch Today's Predictions' to start")
-        ttk.Label(button_frame, textvariable=self.status_var, style='Status.TLabel').pack(side=tk.RIGHT)
+        ttk.Label(button_frame2, textvariable=self.perf_var, style='Status.TLabel').pack(side=tk.RIGHT, padx=10)
         
         # Update performance summary display
         self.update_performance_display()
@@ -684,6 +706,183 @@ class NBAPredictor(tk.Tk):
                 
         except Exception as e:
             self.log(f"Error saving to log: {e}")
+    
+    def start_historical(self):
+        """Start historical prediction run for selected date."""
+        date_str = self.date_var.get().strip()
+        
+        try:
+            target_date = parse_date(date_str)
+            enforce_date_limit(target_date)
+        except ValueError as e:
+            messagebox.showerror("Invalid Date", str(e))
+            return
+        
+        if is_today(target_date):
+            messagebox.showinfo("Info", "For today's predictions, use 'Fetch Today's Predictions' button.")
+            return
+        
+        self.historical_button.config(state=tk.DISABLED)
+        self.status_var.set(f"Running historical analysis for {date_str}...")
+        
+        thread = threading.Thread(target=self.historical_worker, args=(target_date,), daemon=True)
+        thread.start()
+    
+    def historical_worker(self, target_date):
+        """Worker thread for historical prediction run."""
+        try:
+            from jobs.backfill import backfill_predictions
+            
+            self.log(f"\n{'='*60}")
+            self.log(f"Running historical analysis for {format_date(target_date)}")
+            self.log(f"{'='*60}")
+            
+            predictions = backfill_predictions(
+                target_date=target_date,
+                fill_results=True,  # Auto-fill results for past games
+                use_cache=True,
+            )
+            
+            self.log(f"Generated {len(predictions)} predictions")
+            
+            # Update performance display
+            self.after(0, self.update_performance_display)
+            self.after(0, lambda: self.status_var.set(f"Completed historical analysis: {len(predictions)} games"))
+            
+        except Exception as e:
+            self.log(f"\nError in historical analysis: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            self.after(0, lambda: self.status_var.set("Error in historical analysis"))
+        finally:
+            self.after(0, lambda: self.historical_button.config(state=tk.NORMAL))
+    
+    def start_season_backfill(self):
+        """Start full season backfill."""
+        result = messagebox.askyesno(
+            "Full Season Backfill",
+            "This will run predictions for all games in the current season.\n\n"
+            "This may take several minutes and will make many API calls.\n\n"
+            "Continue?"
+        )
+        
+        if not result:
+            return
+        
+        self.season_backfill_button.config(state=tk.DISABLED)
+        self.status_var.set("Running full season backfill...")
+        
+        thread = threading.Thread(target=self.season_backfill_worker, daemon=True)
+        thread.start()
+    
+    def season_backfill_worker(self):
+        """Worker thread for full season backfill."""
+        try:
+            from jobs.backfill import backfill_date_range
+            from jobs.excel_export import export_predictions_to_excel
+            from utils.dates import get_eastern_date, get_season_for_date, get_date_limit
+            from datetime import timedelta
+            
+            today = get_eastern_date()
+            season = get_season_for_date(today)
+            
+            # Determine season start (October of start year)
+            season_start_year = int(season.split("-")[0])
+            season_start = parse_date(f"{season_start_year}-10-22")  # NBA typically starts late October
+            
+            # Limit to 3 months back
+            earliest = get_date_limit()
+            start_date = max(season_start, earliest)
+            
+            # End date is yesterday (today's games haven't been played)
+            end_date = today - timedelta(days=1)
+            
+            if start_date > end_date:
+                self.log("No historical dates to backfill")
+                self.after(0, lambda: self.status_var.set("No historical dates to backfill"))
+                return
+            
+            self.log(f"\n{'#'*60}")
+            self.log(f"FULL SEASON BACKFILL: {season}")
+            self.log(f"Date range: {format_date(start_date)} to {format_date(end_date)}")
+            self.log(f"{'#'*60}")
+            
+            # Run backfill in chunks to stay within limits
+            from utils.dates import get_date_range
+            all_dates = get_date_range(start_date, end_date)
+            
+            total_predictions = 0
+            chunk_size = 7  # Process 7 days at a time
+            
+            for i in range(0, len(all_dates), chunk_size):
+                chunk = all_dates[i:i+chunk_size]
+                chunk_start = chunk[0]
+                chunk_end = chunk[-1]
+                
+                self.log(f"\nProcessing {format_date(chunk_start)} to {format_date(chunk_end)}...")
+                self.after(0, lambda s=chunk_start, e=chunk_end: 
+                           self.status_var.set(f"Backfilling {format_date(s)} to {format_date(e)}..."))
+                
+                try:
+                    count = backfill_date_range(
+                        start_date=chunk_start,
+                        end_date=chunk_end,
+                        fill_results=True,
+                        max_days=chunk_size,
+                        use_cache=True,
+                    )
+                    total_predictions += count
+                except Exception as e:
+                    self.log(f"  Error in chunk: {e}")
+            
+            self.log(f"\n{'#'*60}")
+            self.log(f"BACKFILL COMPLETE: {total_predictions} total predictions")
+            self.log(f"{'#'*60}")
+            
+            # Export to Excel
+            self.log("\nExporting to Excel...")
+            try:
+                excel_path = export_predictions_to_excel(
+                    title=f"NBA Predictions - {season} Season"
+                )
+                self.log(f"Exported to: {excel_path}")
+                self.after(0, lambda: messagebox.showinfo("Backfill Complete", 
+                    f"Generated {total_predictions} predictions\n\nExported to:\n{excel_path}"))
+            except Exception as e:
+                self.log(f"Error exporting to Excel: {e}")
+            
+            # Update performance display
+            self.after(0, self.update_performance_display)
+            self.after(0, lambda: self.status_var.set(f"Season backfill complete: {total_predictions} predictions"))
+            
+        except Exception as e:
+            self.log(f"\nError in season backfill: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            self.after(0, lambda: self.status_var.set("Error in season backfill"))
+        finally:
+            self.after(0, lambda: self.season_backfill_button.config(state=tk.NORMAL))
+    
+    def export_to_excel(self):
+        """Export current predictions to Excel."""
+        try:
+            from jobs.excel_export import export_predictions_to_excel
+            from utils.storage import load_predictions_log
+            
+            entries = load_predictions_log()
+            
+            if not entries:
+                messagebox.showwarning("No Data", "No predictions to export. Run some predictions first.")
+                return
+            
+            excel_path = export_predictions_to_excel(entries)
+            
+            self.log(f"\nExported to Excel: {excel_path}")
+            messagebox.showinfo("Exported", f"Predictions exported to:\n{excel_path}")
+            
+        except Exception as e:
+            self.log(f"Error exporting to Excel: {e}")
+            messagebox.showerror("Export Error", f"Failed to export: {e}")
 
 
 def main():
