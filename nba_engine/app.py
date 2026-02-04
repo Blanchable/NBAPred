@@ -499,27 +499,31 @@ class NBAPredictor(tk.Tk):
         
         stats = self.team_stats[team]
         
+        # Define stats with their display format
+        # format: 'pct' = percentage (multiply by 100), 'num' = raw number
         stat_info = [
-            ('net_rating', 'Net Rating', 'Points per 100 poss differential'),
-            ('off_rating', 'Offensive Rating', 'Points scored per 100 poss'),
-            ('def_rating', 'Defensive Rating', 'Points allowed per 100 poss'),
-            ('home_net_rating', 'Home Net Rating', 'Net rating at home'),
-            ('road_net_rating', 'Road Net Rating', 'Net rating on road'),
-            ('pace', 'Pace', 'Possessions per game'),
-            ('efg_pct', 'Effective FG%', 'Shooting efficiency'),
-            ('fg3_pct', '3-Point %', 'Three-point shooting'),
-            ('ft_rate', 'Free Throw Rate', 'FTA per FGA'),
-            ('tov_pct', 'Turnover %', 'Turnovers per possession'),
-            ('oreb_pct', 'Off Rebound %', 'Offensive rebounding rate'),
+            ('net_rating', 'Net Rating', 'Points per 100 poss differential', 'num'),
+            ('off_rating', 'Offensive Rating', 'Points scored per 100 poss', 'num'),
+            ('def_rating', 'Defensive Rating', 'Points allowed per 100 poss', 'num'),
+            ('home_net_rating', 'Home Net Rating', 'Net rating at home', 'num'),
+            ('road_net_rating', 'Road Net Rating', 'Net rating on road', 'num'),
+            ('pace', 'Pace', 'Possessions per game', 'num'),
+            ('efg_pct', 'Effective FG%', 'Shooting efficiency', 'pct'),
+            ('fg3_pct', '3-Point %', 'Three-point shooting', 'pct'),
+            ('ft_rate', 'Free Throw Rate', 'FTA per FGA', 'num'),
+            ('tov_pct', 'Turnover %', 'Turnovers per possession', 'num'),
+            ('oreb_pct', 'Off Rebound %', 'Offensive rebounding rate', 'num'),
         ]
         
-        for key, name, desc in stat_info:
+        for key, name, desc, fmt in stat_info:
             val = stats.get(key, 'N/A')
             if val != 'N/A':
-                if isinstance(val, float):
-                    if val < 1:
-                        display = f"{val:.1%}"
+                if isinstance(val, (int, float)):
+                    if fmt == 'pct':
+                        # Percentage: show as X.X%
+                        display = f"{val:.1%}" if val <= 1 else f"{val:.1f}%"
                     else:
+                        # Raw number: show with appropriate precision
                         display = f"{val:.1f}"
                 else:
                     display = str(val)
