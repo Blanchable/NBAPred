@@ -31,6 +31,19 @@ from ingest.player_stats import get_player_stats
 from ingest.injuries import find_latest_injury_pdf, download_injury_pdf, parse_injury_pdf
 from model.lineup_adjustment import calculate_lineup_adjusted_strength
 from model.point_system import score_game_v3, GameScore
+from model.asof import get_data_confidence
+
+# Import new utilities
+from utils.dates import get_eastern_date, format_date, parse_date, enforce_date_limit, is_today
+from utils.storage import (
+    PredictionLogEntry,
+    append_predictions,
+    export_daily_predictions,
+    compute_performance_summary,
+    save_performance_summary,
+    OUTPUTS_DIR,
+)
+from jobs.results import update_results_for_date
 
 
 class NBAPredictor(tk.Tk):
@@ -93,8 +106,18 @@ class NBAPredictor(tk.Tk):
         self.save_button = ttk.Button(button_frame, text="💾 Save to CSV", command=self.save_to_csv, state=tk.DISABLED)
         self.save_button.pack(side=tk.LEFT, padx=10)
         
+        self.update_results_button = ttk.Button(button_frame, text="📊 Update Results", command=self.start_update_results)
+        self.update_results_button.pack(side=tk.LEFT, padx=10)
+        
+        # Performance summary label
+        self.perf_var = tk.StringVar(value="")
+        ttk.Label(button_frame, textvariable=self.perf_var, style='Status.TLabel').pack(side=tk.RIGHT, padx=20)
+        
         self.status_var = tk.StringVar(value="Click 'Fetch Today's Predictions' to start")
         ttk.Label(button_frame, textvariable=self.status_var, style='Status.TLabel').pack(side=tk.RIGHT)
+        
+        # Update performance summary display
+        self.update_performance_display()
         
         # Notebook
         self.notebook = ttk.Notebook(self.main_frame)
@@ -425,7 +448,11 @@ class NBAPredictor(tk.Tk):
             
             self.log(f"Generated {len(self.scores)} predictions")
             
+            # Save predictions to log
+            self.after(0, self.save_predictions_to_log)
+            
             self.after(0, self.update_ui)
+            self.after(0, self.update_performance_display)
             self.after(0, self.fetch_complete, True, f"Loaded {len(games)} games")
             
         except Exception as e:
@@ -571,6 +598,92 @@ class NBAPredictor(tk.Tk):
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save: {e}")
+    
+    def update_performance_display(self):
+        """Update the performance summary display."""
+        try:
+            summary = compute_performance_summary()
+            if summary.total_games > 0:
+                self.perf_var.set(
+                    f"Record: {summary.wins}/{summary.total_games} ({summary.win_pct:.1%}) | "
+                    f"Last 7d: {summary.last_7_days_win_pct:.1%}"
+                )
+            else:
+                self.perf_var.set("")
+        except Exception:
+            self.perf_var.set("")
+    
+    def start_update_results(self):
+        """Start updating results in a background thread."""
+        self.update_results_button.config(state=tk.DISABLED)
+        self.status_var.set("Updating results...")
+        thread = threading.Thread(target=self.update_results_worker, daemon=True)
+        thread.start()
+    
+    def update_results_worker(self):
+        """Worker thread to update results."""
+        try:
+            from jobs.results import update_all_pending_results
+            
+            self.log("\nUpdating results for pending predictions...")
+            updated = update_all_pending_results()
+            
+            self.log(f"Updated {updated} predictions with results")
+            
+            # Update performance display
+            self.after(0, self.update_performance_display)
+            self.after(0, lambda: self.status_var.set(f"Updated {updated} results"))
+            
+        except Exception as e:
+            self.log(f"\nError updating results: {e}")
+            self.after(0, lambda: self.status_var.set("Error updating results"))
+        finally:
+            self.after(0, lambda: self.update_results_button.config(state=tk.NORMAL))
+    
+    def save_predictions_to_log(self):
+        """Save current predictions to the prediction log."""
+        if not self.scores:
+            return
+        
+        try:
+            # Determine data confidence
+            data_confidence = get_data_confidence(
+                team_stats_available=len(self.team_stats) > 0,
+                player_stats_available=True,  # We got player stats
+                injury_report_available=len(self.injuries) > 0,
+            )
+            
+            entries = []
+            run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            game_date = format_date(get_eastern_date())
+            
+            for score in self.scores:
+                entry = PredictionLogEntry(
+                    run_timestamp_local=run_timestamp,
+                    game_date=game_date,
+                    game_id="",
+                    away_team=score.away_team,
+                    home_team=score.home_team,
+                    pick=score.predicted_winner,
+                    edge_score_total=round(score.edge_score_total, 2),
+                    projected_margin_home=round(score.projected_margin_home, 1),
+                    home_win_prob=round(score.home_win_prob, 3),
+                    away_win_prob=round(score.away_win_prob, 3),
+                    confidence_level=score.confidence_label.upper(),
+                    confidence_pct=score.confidence_pct,
+                    top_5_factors=score.top_5_factors_str,
+                    injury_report_url="",
+                    data_confidence=data_confidence,
+                )
+                entries.append(entry)
+            
+            if entries:
+                append_predictions(entries)
+                export_daily_predictions(entries, game_date)
+                self.log(f"Saved {len(entries)} predictions to log")
+                
+        except Exception as e:
+            self.log(f"Error saving to log: {e}")
 
 
 def main():
