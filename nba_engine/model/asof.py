@@ -23,8 +23,8 @@ from utils.storage import load_cache, save_cache
 
 
 # Retry configuration for API calls
-MAX_RETRIES = 3
-RETRY_DELAYS = [2, 4, 8]  # Exponential backoff
+MAX_RETRIES = 2  # Reduced for faster backfill
+RETRY_DELAYS = [2, 4]  # Shorter delays for backfill
 
 
 def api_call_with_retry(func: Callable, *args, **kwargs) -> Any:
@@ -181,6 +181,7 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
             season_type_all_star="Regular Season",
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
+            timeout=30,
         )
         overall_df = overall.get_data_frames()[0]
         
@@ -192,6 +193,7 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
             location_nullable="Home",
+            timeout=30,
         )
         home_df = home.get_data_frames()[0]
         
@@ -203,6 +205,7 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
             location_nullable="Road",
+            timeout=30,
         )
         road_df = road.get_data_frames()[0]
         
@@ -362,6 +365,7 @@ def _fetch_player_stats_asof(target_date: date) -> Dict[str, List[AsOfPlayerStat
             season_type_all_star="Regular Season",
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
+            timeout=30,
         )
         players_df = players.get_data_frames()[0]
         
@@ -437,7 +441,7 @@ def get_asof_schedule(target_date: date) -> List[Dict[str, Any]]:
         
         # Use retry logic for API call
         def fetch_scoreboard():
-            return ScoreboardV2(game_date=api_date, timeout=60)
+            return ScoreboardV2(game_date=api_date, timeout=30)
         
         scoreboard = api_call_with_retry(fetch_scoreboard)
         games_df = scoreboard.get_data_frames()[0]  # GameHeader
@@ -516,7 +520,7 @@ def get_asof_game_results(target_date: date) -> Dict[str, str]:
         
         # Use retry logic for API call
         def fetch_scoreboard():
-            return ScoreboardV2(game_date=api_date, timeout=60)
+            return ScoreboardV2(game_date=api_date, timeout=30)
         
         scoreboard = api_call_with_retry(fetch_scoreboard)
         

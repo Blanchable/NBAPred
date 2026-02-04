@@ -778,10 +778,11 @@ class NBAPredictor(tk.Tk):
     def season_backfill_worker(self):
         """Worker thread for full season backfill."""
         try:
-            from jobs.backfill import backfill_date_range
+            from jobs.backfill import backfill_predictions
             from jobs.excel_export import export_predictions_to_excel
-            from utils.dates import get_eastern_date, get_season_for_date, get_date_limit
+            from utils.dates import get_eastern_date, get_season_for_date, get_date_range
             from datetime import timedelta
+            import time
             
             today = get_eastern_date()
             season = get_season_for_date(today)
@@ -790,9 +791,9 @@ class NBAPredictor(tk.Tk):
             season_start_year = int(season.split("-")[0])
             season_start = parse_date(f"{season_start_year}-10-22")  # NBA typically starts late October
             
-            # Limit to 3 months back
-            earliest = get_date_limit()
-            start_date = max(season_start, earliest)
+            # Limit to past 60 days OR season start, whichever is more recent
+            sixty_days_ago = today - timedelta(days=60)
+            start_date = max(season_start, sixty_days_ago)
             
             # End date is yesterday (today's games haven't been played)
             end_date = today - timedelta(days=1)
@@ -802,58 +803,76 @@ class NBAPredictor(tk.Tk):
                 self.after(0, lambda: self.status_var.set("No historical dates to backfill"))
                 return
             
-            self.log(f"\n{'#'*60}")
-            self.log(f"FULL SEASON BACKFILL: {season}")
-            self.log(f"Date range: {format_date(start_date)} to {format_date(end_date)}")
-            self.log(f"{'#'*60}")
-            
-            # Run backfill in chunks to stay within limits
-            from utils.dates import get_date_range
             all_dates = get_date_range(start_date, end_date)
             
-            total_predictions = 0
-            chunk_size = 7  # Process 7 days at a time
+            self.log(f"\n{'#'*60}")
+            self.log(f"SEASON BACKFILL: {season}")
+            self.log(f"Date range: {format_date(start_date)} to {format_date(end_date)}")
+            self.log(f"Total days: {len(all_dates)}")
+            self.log(f"{'#'*60}")
             
-            for i in range(0, len(all_dates), chunk_size):
-                chunk = all_dates[i:i+chunk_size]
-                chunk_start = chunk[0]
-                chunk_end = chunk[-1]
-                
-                self.log(f"\nProcessing {format_date(chunk_start)} to {format_date(chunk_end)}...")
-                self.after(0, lambda s=chunk_start, e=chunk_end: 
-                           self.status_var.set(f"Backfilling {format_date(s)} to {format_date(e)}..."))
+            total_predictions = 0
+            successful_days = 0
+            failed_days = 0
+            
+            # Process day by day (more reliable than chunks)
+            for i, d in enumerate(all_dates, 1):
+                date_str = format_date(d)
+                self.log(f"\n[{i}/{len(all_dates)}] Processing {date_str}...")
+                self.after(0, lambda ds=date_str, idx=i, total=len(all_dates): 
+                           self.status_var.set(f"Backfilling {ds} ({idx}/{total})..."))
                 
                 try:
-                    count = backfill_date_range(
-                        start_date=chunk_start,
-                        end_date=chunk_end,
+                    predictions = backfill_predictions(
+                        target_date=d,
                         fill_results=True,
-                        max_days=chunk_size,
                         use_cache=True,
                     )
+                    count = len(predictions)
                     total_predictions += count
+                    successful_days += 1
+                    self.log(f"  -> {count} predictions")
                 except Exception as e:
-                    self.log(f"  Error in chunk: {e}")
+                    failed_days += 1
+                    self.log(f"  -> Error: {e}")
+                
+                # Rate limit between days to avoid API issues
+                if i < len(all_dates):
+                    time.sleep(2)
             
             self.log(f"\n{'#'*60}")
-            self.log(f"BACKFILL COMPLETE: {total_predictions} total predictions")
+            self.log(f"BACKFILL COMPLETE")
+            self.log(f"  Total predictions: {total_predictions}")
+            self.log(f"  Successful days: {successful_days}")
+            self.log(f"  Failed days: {failed_days}")
             self.log(f"{'#'*60}")
             
             # Export to Excel
             self.log("\nExporting to Excel...")
             try:
                 excel_path = export_predictions_to_excel(
-                    title=f"NBA Predictions - {season} Season"
+                    title=f"NBA Predictions - {season} Season (Last 60 Days)"
                 )
                 self.log(f"Exported to: {excel_path}")
                 self.after(0, lambda: messagebox.showinfo("Backfill Complete", 
-                    f"Generated {total_predictions} predictions\n\nExported to:\n{excel_path}"))
+                    f"Generated {total_predictions} predictions\n"
+                    f"Successful days: {successful_days}\n"
+                    f"Failed days: {failed_days}\n\n"
+                    f"Exported to:\n{excel_path}"))
             except Exception as e:
                 self.log(f"Error exporting to Excel: {e}")
             
+            # Update performance summary
+            try:
+                from utils.storage import compute_performance_summary, save_performance_summary
+                summary = compute_performance_summary()
+                save_performance_summary(summary)
+            except Exception as e:
+                self.log(f"Error updating performance summary: {e}")
+            
             # Update performance display
             self.after(0, self.update_performance_display)
-            self.after(0, lambda: self.status_var.set(f"Season backfill complete: {total_predictions} predictions"))
+            self.after(0, lambda: self.status_var.set(f"Backfill complete: {total_predictions} predictions"))
             
         except Exception as e:
             self.log(f"\nError in season backfill: {e}")

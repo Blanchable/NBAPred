@@ -71,9 +71,13 @@ def backfill_predictions(
             print("  Skipping (use --fill-results to update results only)")
             return existing
     
-    # Get schedule for target date
+    # Get schedule for target date (with timeout protection)
     print(f"\n[1/5] Fetching schedule for {date_str}...")
-    games = get_asof_schedule(target_date)
+    try:
+        games = get_asof_schedule(target_date)
+    except Exception as e:
+        print(f"  Error fetching schedule: {e}")
+        return []
     
     if not games:
         print(f"  No games found for {date_str}")
@@ -84,26 +88,42 @@ def backfill_predictions(
     for i, g in enumerate(games[:3]):
         print(f"    Game {i+1}: {g['away_team']} @ {g['home_team']} (id: {g['game_id']})")
     
-    # Get as-of team stats
+    # Get as-of team stats (with timeout protection)
     print(f"\n[2/5] Fetching team stats as-of {date_str}...")
-    team_stats = get_asof_team_stats(target_date, use_cache=use_cache)
-    team_stats_available = len(team_stats) > 0
-    print(f"  Loaded {len(team_stats)} team stats")
+    try:
+        team_stats = get_asof_team_stats(target_date, use_cache=use_cache)
+        team_stats_available = len(team_stats) > 0
+        print(f"  Loaded {len(team_stats)} team stats")
+    except Exception as e:
+        print(f"  Error fetching team stats: {e}")
+        team_stats = {}
+        team_stats_available = False
     
-    # Get as-of player stats
+    # Get as-of player stats (with timeout protection)
     print(f"\n[3/5] Fetching player stats as-of {date_str}...")
-    player_stats = get_asof_player_stats(target_date, use_cache=use_cache)
-    player_stats_available = len(player_stats) > 0
-    print(f"  Loaded player stats for {len(player_stats)} teams")
+    try:
+        player_stats = get_asof_player_stats(target_date, use_cache=use_cache)
+        player_stats_available = len(player_stats) > 0
+        print(f"  Loaded player stats for {len(player_stats)} teams")
+    except Exception as e:
+        print(f"  Error fetching player stats: {e}")
+        player_stats = {}
+        player_stats_available = False
     
     # Get historical injury report (1 hour before first game)
     print(f"\n[4/5] Fetching historical injury report...")
-    first_game_time = get_first_game_time(games, target_date)
-    injuries, injury_url, injury_report_available = get_historical_injury_report(
-        target_date=target_date,
-        first_game_time=first_game_time,
-        hours_before=1.0,
-    )
+    try:
+        first_game_time = get_first_game_time(games, target_date)
+        injuries, injury_url, injury_report_available = get_historical_injury_report(
+            target_date=target_date,
+            first_game_time=first_game_time,
+            hours_before=1.0,
+        )
+    except Exception as e:
+        print(f"  Error fetching injury report: {e}")
+        injuries = []
+        injury_url = None
+        injury_report_available = False
     
     # Generate predictions
     print(f"\n[5/5] Generating predictions...")
