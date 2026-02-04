@@ -46,6 +46,15 @@ from .rotation_replacement import (
     get_replacement_candidates,
     REPLACEMENT_EDGE_CLAMP,
 )
+from .asof import (
+    get_asof_team_stats,
+    get_asof_player_stats,
+    get_asof_schedule,
+    get_asof_game_results,
+    get_data_confidence,
+    AsOfTeamStats,
+    AsOfPlayerStats,
+)
 
 __all__ = [
     # Point system
@@ -87,4 +96,12 @@ __all__ = [
     "get_absent_stars",
     "get_replacement_candidates",
     "REPLACEMENT_EDGE_CLAMP",
+    # As-of stats
+    "get_asof_team_stats",
+    "get_asof_player_stats",
+    "get_asof_schedule",
+    "get_asof_game_results",
+    "get_data_confidence",
+    "AsOfTeamStats",
+    "AsOfPlayerStats",
 ]
