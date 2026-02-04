@@ -52,6 +52,8 @@ from .asof import (
     get_asof_schedule,
     get_asof_game_results,
     get_data_confidence,
+    get_first_game_time,
+    get_historical_injury_report,
     AsOfTeamStats,
     AsOfPlayerStats,
 )
@@ -102,6 +104,8 @@ __all__ = [
     "get_asof_schedule",
     "get_asof_game_results",
     "get_data_confidence",
+    "get_first_game_time",
+    "get_historical_injury_report",
     "AsOfTeamStats",
     "AsOfPlayerStats",
 ]

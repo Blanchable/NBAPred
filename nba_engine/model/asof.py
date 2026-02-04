@@ -10,7 +10,7 @@ Key principle: For date D, use only games completed before D (not including D it
 
 import time
 from dataclasses import dataclass, asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Any, Callable
 from pathlib import Path
 
@@ -459,12 +459,17 @@ def get_asof_schedule(target_date: date) -> List[Dict[str, Any]]:
                 print(f"    Skipping game {game_id}: missing team mapping (home_id={home_id}, away_id={away_id})")
                 continue
             
+            # Get game time if available
+            game_time_utc = str(row.get('GAME_DATE_EST', '') or '')  # Usually has datetime
+            game_time_et = str(row.get('GAME_STATUS_TEXT', '') or '')
+            
             game = {
                 'game_id': game_id,
                 'game_date': log_date,
                 'home_team': home_abbrev,
                 'away_team': away_abbrev,
-                'game_status': str(row.get('GAME_STATUS_TEXT', '') or ''),
+                'game_status': game_time_et,
+                'game_time_utc': game_time_utc,
             }
             games.append(game)
         
@@ -569,6 +574,118 @@ def get_asof_game_results(target_date: date) -> Dict[str, str]:
         import traceback
         traceback.print_exc()
         return {}
+
+
+def get_first_game_time(games: List[Dict[str, Any]], target_date: date) -> datetime:
+    """
+    Get the start time of the first game on a date.
+    
+    Used to determine the cutoff time for historical injury reports.
+    
+    Args:
+        games: List of game dicts from get_asof_schedule
+        target_date: The target date
+        
+    Returns:
+        datetime of first game (defaults to 7 PM ET if not available)
+    """
+    import pytz
+    
+    eastern = pytz.timezone('US/Eastern')
+    
+    # Default to 7 PM ET on game day (typical first game time)
+    default_time = eastern.localize(datetime(
+        target_date.year, target_date.month, target_date.day,
+        19, 0, 0  # 7:00 PM ET
+    ))
+    
+    if not games:
+        return default_time
+    
+    # Try to parse game times from the schedule
+    earliest = None
+    
+    for game in games:
+        game_time_str = game.get('game_time_utc', '')
+        
+        if game_time_str:
+            try:
+                # Try parsing ISO format
+                if 'T' in game_time_str:
+                    dt = datetime.fromisoformat(game_time_str.replace('Z', '+00:00'))
+                    dt_eastern = dt.astimezone(eastern)
+                else:
+                    # Try parsing date format
+                    dt = datetime.strptime(game_time_str[:19], '%Y-%m-%dT%H:%M:%S')
+                    dt_eastern = eastern.localize(dt)
+                
+                if earliest is None or dt_eastern < earliest:
+                    earliest = dt_eastern
+            except (ValueError, TypeError):
+                continue
+    
+    return earliest if earliest else default_time
+
+
+def get_historical_injury_report(
+    target_date: date,
+    first_game_time: datetime = None,
+    hours_before: float = 1.0,
+) -> tuple:
+    """
+    Get the injury report that would have been available before games on a date.
+    
+    Args:
+        target_date: Date to get injury report for
+        first_game_time: Time of first game (defaults to 7 PM ET)
+        hours_before: Hours before first game to set cutoff (default 1)
+        
+    Returns:
+        Tuple of (injuries_list, injury_url, injury_report_available)
+    """
+    import pytz
+    from ingest.injuries import find_injury_pdf_for_date, download_injury_pdf, parse_injury_pdf
+    
+    eastern = pytz.timezone('US/Eastern')
+    
+    # Default first game time to 7 PM ET
+    if first_game_time is None:
+        first_game_time = eastern.localize(datetime(
+            target_date.year, target_date.month, target_date.day,
+            19, 0, 0
+        ))
+    
+    # Calculate cutoff time (1 hour before first game)
+    cutoff_time = first_game_time - timedelta(hours=hours_before)
+    
+    print(f"  Looking for injury report before {cutoff_time.strftime('%Y-%m-%d %I:%M %p ET')}")
+    
+    # Find injury report
+    injury_url = find_injury_pdf_for_date(
+        target_date=first_game_time,
+        cutoff_time=cutoff_time,
+        max_hours_back=24,
+    )
+    
+    if not injury_url:
+        print(f"  No injury report found for {target_date}")
+        return [], None, False
+    
+    print(f"  Found injury report: {injury_url}")
+    
+    # Download and parse
+    try:
+        pdf_bytes = download_injury_pdf(injury_url)
+        if pdf_bytes:
+            injuries = parse_injury_pdf(pdf_bytes)
+            print(f"  Parsed {len(injuries)} injury entries")
+            return injuries, injury_url, True
+        else:
+            print(f"  Failed to download injury report")
+            return [], injury_url, False
+    except Exception as e:
+        print(f"  Error parsing injury report: {e}")
+        return [], injury_url, False
 
 
 def get_data_confidence(

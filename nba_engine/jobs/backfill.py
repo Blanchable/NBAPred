@@ -29,6 +29,8 @@ from model.asof import (
     get_asof_schedule,
     get_asof_game_results,
     get_data_confidence,
+    get_first_game_time,
+    get_historical_injury_report,
 )
 
 
@@ -70,7 +72,7 @@ def backfill_predictions(
             return existing
     
     # Get schedule for target date
-    print(f"\n[1/4] Fetching schedule for {date_str}...")
+    print(f"\n[1/5] Fetching schedule for {date_str}...")
     games = get_asof_schedule(target_date)
     
     if not games:
@@ -83,19 +85,28 @@ def backfill_predictions(
         print(f"    Game {i+1}: {g['away_team']} @ {g['home_team']} (id: {g['game_id']})")
     
     # Get as-of team stats
-    print(f"\n[2/4] Fetching team stats as-of {date_str}...")
+    print(f"\n[2/5] Fetching team stats as-of {date_str}...")
     team_stats = get_asof_team_stats(target_date, use_cache=use_cache)
     team_stats_available = len(team_stats) > 0
     print(f"  Loaded {len(team_stats)} team stats")
     
     # Get as-of player stats
-    print(f"\n[3/4] Fetching player stats as-of {date_str}...")
+    print(f"\n[3/5] Fetching player stats as-of {date_str}...")
     player_stats = get_asof_player_stats(target_date, use_cache=use_cache)
     player_stats_available = len(player_stats) > 0
     print(f"  Loaded player stats for {len(player_stats)} teams")
     
+    # Get historical injury report (1 hour before first game)
+    print(f"\n[4/5] Fetching historical injury report...")
+    first_game_time = get_first_game_time(games, target_date)
+    injuries, injury_url, injury_report_available = get_historical_injury_report(
+        target_date=target_date,
+        first_game_time=first_game_time,
+        hours_before=1.0,
+    )
+    
     # Generate predictions
-    print(f"\n[4/4] Generating predictions...")
+    print(f"\n[5/5] Generating predictions...")
     
     # Track missing stats for debug
     missing_stats_warned = set()
@@ -106,7 +117,7 @@ def backfill_predictions(
     data_confidence = get_data_confidence(
         team_stats_available=team_stats_available,
         player_stats_available=player_stats_available,
-        injury_report_available=False,  # Historical injury reports not fetched
+        injury_report_available=injury_report_available,
     )
     
     for game in games:
@@ -182,10 +193,26 @@ def backfill_predictions(
         home_strength = HistoricalStrength(home_stats_dict)
         away_strength = HistoricalStrength(away_stats_dict)
         
+        # Filter injuries for each team
+        home_injuries = [inj for inj in injuries 
+                        if getattr(inj, 'team', '').upper() == home_team.upper()]
+        away_injuries = [inj for inj in injuries 
+                        if getattr(inj, 'team', '').upper() == away_team.upper()]
+        
+        # Helper to find player's injury status
+        def get_player_injury_status(player_name, team_injuries):
+            """Look up player's status from injuries list."""
+            player_name_lower = player_name.lower()
+            for inj in team_injuries:
+                inj_player = getattr(inj, 'player', '') or ''
+                if player_name_lower in inj_player.lower() or inj_player.lower() in player_name_lower:
+                    return getattr(inj, 'status', 'Available')
+            return "Available"
+        
         # Convert AsOfPlayerStats to objects with expected attributes
         class HistoricalPlayer:
             """Wraps historical player stats for compatibility with scoring model."""
-            def __init__(self, p):
+            def __init__(self, p, team_injuries):
                 self.player_name = p.player_name
                 self.player_id = getattr(p, 'player_id', '')
                 self.team = getattr(p, 'team', '')
@@ -197,12 +224,13 @@ def backfill_predictions(
                 self.mpg = p.minutes_per_game  # Alias
                 self.rebounds_per_game = getattr(p, 'rebounds_per_game', 0)
                 self.impact_score = p.impact_score
-                self.status = "Available"  # No injury data for historical
+                # Get status from historical injury report
+                self.status = get_player_injury_status(p.player_name, team_injuries)
                 self.is_star = False  # Will be set by lineup adjustment
                 self.impact_rank = 0  # Will be set by lineup adjustment
         
-        home_players_obj = [HistoricalPlayer(p) for p in home_players]
-        away_players_obj = [HistoricalPlayer(p) for p in away_players]
+        home_players_obj = [HistoricalPlayer(p, home_injuries) for p in home_players]
+        away_players_obj = [HistoricalPlayer(p, away_injuries) for p in away_players]
         
         # Calculate lineup adjusted strength
         try:
@@ -210,15 +238,17 @@ def backfill_predictions(
                 team=home_team,
                 team_strength=home_strength,
                 players=home_players_obj,
-                injuries=[],
+                injuries=home_injuries,
                 is_home=True,
+                injury_report_available=injury_report_available,
             )
             away_lineup = calculate_lineup_adjusted_strength(
                 team=away_team,
                 team_strength=away_strength,
                 players=away_players_obj,
-                injuries=[],
+                injuries=away_injuries,
                 is_home=False,
+                injury_report_available=injury_report_available,
             )
         except Exception as e:
             print(f"  Warning: Lineup calculation failed for {away_team} @ {home_team}: {e}")
@@ -246,8 +276,8 @@ def backfill_predictions(
                 away_rest_days=1,
                 home_players=home_players_obj,
                 away_players=away_players_obj,
-                home_injuries=[],
-                away_injuries=[],
+                home_injuries=home_injuries,
+                away_injuries=away_injuries,
             )
         except Exception as e:
             print(f"  Warning: Scoring failed for {away_team} @ {home_team}: {e}")
@@ -268,7 +298,7 @@ def backfill_predictions(
             confidence_level=score.confidence_label.upper(),
             confidence_pct=score.confidence_pct,
             top_5_factors=score.top_5_factors_str,
-            injury_report_url="",
+            injury_report_url=injury_url or "",
             data_confidence=data_confidence,
         )
         

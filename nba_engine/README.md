@@ -70,6 +70,51 @@ For automation or scripting:
 ./venv/bin/python run_today.py
 ```
 
+## Historical Analysis Mode
+
+The engine can generate predictions for past dates using "as-of" data - only using statistics and injury reports that would have been available before games on that date.
+
+### How It Works
+
+1. **Team/Player Stats**: Uses statistics computed using only games completed **before** the target date (no future data leakage)
+2. **Injury Report**: Fetches the official NBA injury report that was published **1 hour before the first game** on the target date
+3. **Predictions**: Generates predictions using the same model, simulating what would have been predicted on that day
+
+### Running Historical Analysis
+
+**Via GUI:**
+- Enter a date in the "Historical Date" field (YYYY-MM-DD format)
+- Click "Run Historical" to analyze a single date
+- Click "Full Season Backfill" to analyze all dates in the current season
+
+**Via Command Line:**
+```powershell
+# Single date
+python run_today.py --date 2025-12-15
+
+# Date range backfill
+python run_today.py --backfill 2025-12-01 2025-12-31
+
+# Fill in actual results
+python run_today.py --fill-results
+
+# Clear cached historical data (use after model updates)
+python run_today.py --clear-cache
+```
+
+### Data Freshness
+
+The historical mode ensures accuracy by:
+- Using `date_to` parameter in NBA API calls to cap statistics at the day before the target date
+- Finding injury reports published up to (but not after) 1 hour before the first game
+- Caching API responses to reduce load (clear with `--clear-cache`)
+
+### Limitations
+
+- Historical data only available for dates within the current NBA season
+- Cannot go back more than 3 months from today
+- Some very old injury reports may no longer be available on NBA servers
+
 ## Project Structure
 
 ```
