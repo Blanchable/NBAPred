@@ -90,14 +90,27 @@ def backfill_predictions(
     
     # Get as-of team stats (with timeout protection)
     print(f"\n[2/5] Fetching team stats as-of {date_str}...")
+    using_fallback_stats = False
     try:
         team_stats = get_asof_team_stats(target_date, use_cache=use_cache)
         team_stats_available = len(team_stats) > 0
-        print(f"  Loaded {len(team_stats)} team stats")
+        
+        # Check if we got real data or fallback
+        if team_stats:
+            sample = next(iter(team_stats.values()), None)
+            if sample and sample.games_played == 0:
+                using_fallback_stats = True
+                print(f"  *** WARNING: Using FALLBACK stats (API unavailable) ***")
+                print(f"  *** Predictions for {date_str} may be INACCURATE ***")
+            else:
+                print(f"  Loaded {len(team_stats)} team stats (real data)")
+        else:
+            print(f"  Loaded {len(team_stats)} team stats")
     except Exception as e:
         print(f"  Error fetching team stats: {e}")
         team_stats = {}
         team_stats_available = False
+        using_fallback_stats = True
     
     # Get as-of player stats (with timeout protection)
     print(f"\n[3/5] Fetching player stats as-of {date_str}...")
@@ -134,11 +147,15 @@ def backfill_predictions(
     run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Determine data confidence
-    data_confidence = get_data_confidence(
-        team_stats_available=team_stats_available,
-        player_stats_available=player_stats_available,
-        injury_report_available=injury_report_available,
-    )
+    # If using fallback stats, mark as low confidence
+    if using_fallback_stats:
+        data_confidence = "LOW (fallback stats)"
+    else:
+        data_confidence = get_data_confidence(
+            team_stats_available=team_stats_available,
+            player_stats_available=player_stats_available,
+            injury_report_available=injury_report_available,
+        )
     
     for game in games:
         home_team = game['home_team']

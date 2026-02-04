@@ -23,8 +23,8 @@ from utils.storage import load_cache, save_cache
 
 
 # Retry configuration for API calls
-MAX_RETRIES = 2  # Reduced for faster backfill
-RETRY_DELAYS = [2, 4]  # Shorter delays for backfill
+MAX_RETRIES = 3
+RETRY_DELAYS = [3, 6, 12]  # Exponential backoff with longer waits
 
 
 def api_call_with_retry(func: Callable, *args, **kwargs) -> Any:
@@ -139,8 +139,28 @@ def get_asof_team_stats(
     
     print(f"  Computing team stats as of {date_str}...")
     
-    # Try to fetch from NBA API with date filter
-    stats = _fetch_team_stats_asof(target_date)
+    # Try to fetch from NBA API with date filter, with retries
+    stats = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            stats = _fetch_team_stats_asof(target_date)
+            # Check if we got real data (not fallback)
+            if stats:
+                sample = next(iter(stats.values()), None)
+                if sample and sample.games_played > 0:
+                    break  # Got real data
+                elif attempt < MAX_RETRIES - 1:
+                    print(f"  Got fallback data, retrying... (attempt {attempt + 1}/{MAX_RETRIES})")
+                    time.sleep(RETRY_DELAYS[attempt])
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                print(f"  API error: {e}, retrying... (attempt {attempt + 1}/{MAX_RETRIES})")
+                time.sleep(RETRY_DELAYS[attempt])
+            else:
+                print(f"  API failed after {MAX_RETRIES} attempts: {e}")
+    
+    if stats is None:
+        stats = _get_fallback_team_stats(target_date)
     
     if stats and use_cache:
         # Save to cache
@@ -181,7 +201,7 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
             season_type_all_star="Regular Season",
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
-            timeout=30,
+            timeout=60,
         )
         overall_df = overall.get_data_frames()[0]
         
@@ -193,7 +213,7 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
             location_nullable="Home",
-            timeout=30,
+            timeout=60,
         )
         home_df = home.get_data_frames()[0]
         
@@ -205,7 +225,7 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
             location_nullable="Road",
-            timeout=30,
+            timeout=60,
         )
         road_df = road.get_data_frames()[0]
         
@@ -278,11 +298,18 @@ def _fetch_team_stats_asof(target_date: date) -> Dict[str, AsOfTeamStats]:
         
     except Exception as e:
         print(f"  Warning: Failed to fetch as-of stats: {e}")
+        print(f"  *** USING FALLBACK DATA - PREDICTIONS MAY BE INACCURATE ***")
         return _get_fallback_team_stats(target_date)
 
 
 def _get_fallback_team_stats(target_date: date) -> Dict[str, AsOfTeamStats]:
-    """Generate fallback team stats when API fails."""
+    """
+    Generate fallback team stats when API fails.
+    
+    WARNING: These are neutral/default values and will produce
+    inaccurate predictions. Historical analysis using fallback data
+    should be treated with caution.
+    """
     # All 30 NBA teams with neutral ratings
     teams = [
         "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -365,7 +392,7 @@ def _fetch_player_stats_asof(target_date: date) -> Dict[str, List[AsOfPlayerStat
             season_type_all_star="Regular Season",
             date_to_nullable=date_to,
             per_mode_detailed="PerGame",
-            timeout=30,
+            timeout=60,
         )
         players_df = players.get_data_frames()[0]
         
