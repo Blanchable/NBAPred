@@ -8,12 +8,19 @@ Lineup-aware, matchup-sensitive NBA pregame predictions with:
 - 20-factor weighted scoring system
 - Calibrated win probabilities
 - Prediction logging for backtesting
+- Historical "as-of" mode for backtesting
 
 Usage:
-    python run_today.py
+    python run_today.py                  # Run for today
+    python run_today.py --date 2024-01-15    # Run for historical date
+    python run_today.py --date 2024-01-15 --fill-results  # Fill results too
+    python run_today.py --update-results     # Update pending results
+    python run_today.py --show-performance   # Show performance summary
+    python run_today.py --backfill 2024-01-01 2024-01-15  # Backfill range
 """
 
-from datetime import datetime
+import argparse
+from datetime import datetime, date, timedelta
 from pathlib import Path
 import sys
 
@@ -43,10 +50,80 @@ from model.lineup_adjustment import (
 )
 from model.point_system import score_game_v3, validate_system, GameScore
 from model.calibration import PredictionLogger, PredictionRecord
+from model.asof import get_data_confidence
+
+# Import new utilities
+from utils.dates import (
+    parse_date,
+    format_date,
+    get_eastern_date,
+    enforce_date_limit,
+    is_today,
+)
+from utils.storage import (
+    PredictionLogEntry,
+    append_predictions,
+    export_daily_predictions,
+    compute_performance_summary,
+    save_performance_summary,
+    format_performance_summary,
+    OUTPUTS_DIR,
+)
 
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs"
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="NBA Prediction Engine v3 - Daily Runner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python run_today.py                        # Run for today
+  python run_today.py --date 2024-01-15      # Historical date
+  python run_today.py --fill-results         # Fill results for pending
+  python run_today.py --update-results       # Update all pending results
+  python run_today.py --show-performance     # Show win % summary
+  python run_today.py --backfill START END   # Backfill date range
+        """
+    )
+    
+    parser.add_argument(
+        "--date", "-d",
+        type=str,
+        default=None,
+        help="Target date (YYYY-MM-DD). Default: today"
+    )
+    
+    parser.add_argument(
+        "--fill-results", "-f",
+        action="store_true",
+        help="Fill actual results after generating predictions"
+    )
+    
+    parser.add_argument(
+        "--update-results", "-u",
+        action="store_true",
+        help="Update results for all pending predictions and exit"
+    )
+    
+    parser.add_argument(
+        "--show-performance", "-p",
+        action="store_true",
+        help="Show performance summary and exit"
+    )
+    
+    parser.add_argument(
+        "--backfill", "-b",
+        nargs=2,
+        metavar=("START", "END"),
+        help="Backfill predictions for date range (YYYY-MM-DD)"
+    )
+    
+    return parser.parse_args()
 
 
 def get_timestamp() -> str:
@@ -130,10 +207,147 @@ def save_availability_debug_csv(debug_rows: list[dict], timestamp: str) -> Path:
     return output_path
 
 
+def handle_update_results() -> int:
+    """Handle --update-results mode."""
+    print("=" * 70)
+    print("NBA Prediction Engine v3 - Update Results")
+    print("=" * 70)
+    print()
+    
+    from jobs.results import update_all_pending_results, show_performance_summary
+    
+    updated = update_all_pending_results()
+    
+    if updated > 0:
+        print()
+        show_performance_summary()
+    
+    return 0
+
+
+def handle_show_performance() -> int:
+    """Handle --show-performance mode."""
+    summary = compute_performance_summary()
+    print(format_performance_summary(summary))
+    save_performance_summary(summary)
+    return 0
+
+
+def handle_backfill(start_str: str, end_str: str) -> int:
+    """Handle --backfill mode."""
+    try:
+        start_date = parse_date(start_str)
+        end_date = parse_date(end_str)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
+    
+    from jobs.backfill import backfill_date_range
+    
+    try:
+        backfill_date_range(start_date, end_date, fill_results=True)
+        return 0
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+
+def run_historical_predictions(target_date: date, fill_results: bool) -> int:
+    """Run predictions for a historical date using as-of data."""
+    from jobs.backfill import backfill_predictions
+    
+    try:
+        predictions = backfill_predictions(
+            target_date=target_date,
+            fill_results=fill_results,
+            use_cache=True,
+        )
+        
+        if predictions:
+            # Export daily predictions file
+            date_str = format_date(target_date)
+            export_daily_predictions(predictions, date_str)
+            print(f"\nExported predictions to outputs/predictions_{date_str.replace('-', '')}.csv")
+        
+        return 0
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+
+def create_prediction_log_entries(
+    scores: list[GameScore],
+    games: list,
+    injury_url: str,
+    data_confidence: str,
+) -> list[PredictionLogEntry]:
+    """Create prediction log entries from scores."""
+    entries = []
+    run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    game_date = format_date(get_eastern_date())
+    
+    # Build game lookup
+    game_lookup = {(g.home_team, g.away_team): g for g in games}
+    
+    for score in scores:
+        game = game_lookup.get((score.home_team, score.away_team))
+        game_id = game.game_id if game else ""
+        
+        entry = PredictionLogEntry(
+            run_timestamp_local=run_timestamp,
+            game_date=game_date,
+            game_id=game_id,
+            away_team=score.away_team,
+            home_team=score.home_team,
+            pick=score.predicted_winner,
+            edge_score_total=round(score.edge_score_total, 2),
+            projected_margin_home=round(score.projected_margin_home, 1),
+            home_win_prob=round(score.home_win_prob, 3),
+            away_win_prob=round(score.away_win_prob, 3),
+            confidence_level=score.confidence_label.upper(),
+            confidence_pct=score.confidence_pct,
+            top_5_factors=score.top_5_factors_str,
+            injury_report_url=injury_url or "",
+            data_confidence=data_confidence,
+        )
+        entries.append(entry)
+    
+    return entries
+
+
 def main() -> int:
     """Main entry point for daily prediction run."""
+    args = parse_args()
+    
+    # Handle special modes first
+    if args.update_results:
+        return handle_update_results()
+    
+    if args.show_performance:
+        return handle_show_performance()
+    
+    if args.backfill:
+        return handle_backfill(args.backfill[0], args.backfill[1])
+    
+    # Determine target date
+    if args.date:
+        try:
+            target_date = parse_date(args.date)
+            enforce_date_limit(target_date)
+            is_historical = not is_today(target_date)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            return 1
+    else:
+        target_date = get_eastern_date()
+        is_historical = False
+    
+    date_str = format_date(target_date)
+    
     print("=" * 70)
     print("NBA Prediction Engine v3 - Lineup-Aware Predictions")
+    if is_historical:
+        print(f"  HISTORICAL MODE: {date_str}")
     print("=" * 70)
     print()
     
@@ -150,6 +364,10 @@ def main() -> int:
     
     # Initialize prediction logger
     logger = PredictionLogger(OUTPUT_DIR)
+    
+    # For historical mode, use as-of data
+    if is_historical:
+        return run_historical_predictions(target_date, args.fill_results)
     
     # Step 1: Fetch today's slate
     print("[1/7] Pulling today's slate...")
@@ -456,11 +674,47 @@ def main() -> int:
         avail_path = save_availability_debug_csv(all_availability_debug, timestamp)
         print(f"  Availability Debug: {avail_path}")
     
-    # Log predictions for calibration
+    # Log predictions for calibration (old logger)
     logger.log_predictions(prediction_records)
     print(f"  Logged {len(prediction_records)} predictions for calibration.")
     
+    # Log to new prediction log system
+    data_confidence = get_data_confidence(
+        team_stats_available=len(team_strength) > 0,
+        player_stats_available=len(player_stats) > 0,
+        injury_report_available=injury_report_available,
+    )
+    
+    log_entries = create_prediction_log_entries(
+        scores=scores,
+        games=games,
+        injury_url=injury_url or "",
+        data_confidence=data_confidence,
+    )
+    
+    if log_entries:
+        append_predictions(log_entries)
+        print(f"  Saved {len(log_entries)} entries to predictions_log.csv")
+        
+        # Export daily predictions file
+        date_str = format_date(get_eastern_date())
+        daily_path = export_daily_predictions(log_entries, date_str)
+        print(f"  Daily export: {daily_path}")
+    
     print()
+    
+    # Show performance summary if we have results
+    summary = compute_performance_summary()
+    if summary.total_games > 0:
+        print("=" * 70)
+        print("PERFORMANCE SUMMARY")
+        print("=" * 70)
+        print(f"  Overall: {summary.wins}/{summary.total_games} ({summary.win_pct:.1%})")
+        print(f"  Last 7 days: {summary.last_7_days_wins}/{summary.last_7_days_games} ({summary.last_7_days_win_pct:.1%})")
+        print(f"  Last 30 days: {summary.last_30_days_wins}/{summary.last_30_days_games} ({summary.last_30_days_win_pct:.1%})")
+        save_performance_summary(summary)
+        print()
+    
     print("=" * 70)
     print("Run complete!")
     print("=" * 70)
