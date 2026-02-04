@@ -499,14 +499,14 @@ class NBAPredictor(tk.Tk):
         self.create_log_view()
     
     def create_predictions_tree(self):
-        """Create the predictions treeview with confidence display."""
+        """Create the predictions treeview with confidence and totals display."""
         # Container with card-like appearance
         container = tk.Frame(self.predictions_frame, bg=COLORS['card_bg'])
         container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         columns = (
-            'matchup', 'pick', 'side', 'conf_pct', 'bucket', 'edge', 
-            'home_prob', 'away_prob', 'margin'
+            'matchup', 'pick', 'side', 'conf_pct', 'bucket', 
+            'pred_score', 'total', 'total_range', 'edge', 'margin'
         )
         
         self.pred_tree = ttk.Treeview(
@@ -518,15 +518,16 @@ class NBAPredictor(tk.Tk):
         
         # Configure columns with better widths
         col_configs = [
-            ('matchup', 'Matchup', 130),
-            ('pick', 'Pick', 70),
-            ('side', 'Side', 70),
-            ('conf_pct', 'Conf %', 80),
-            ('bucket', 'Bucket', 80),
-            ('edge', 'Edge', 70),
-            ('home_prob', 'Home %', 80),
-            ('away_prob', 'Away %', 80),
-            ('margin', 'Margin', 80),
+            ('matchup', 'Matchup', 110),
+            ('pick', 'Pick', 55),
+            ('side', 'Side', 55),
+            ('conf_pct', 'Conf %', 70),
+            ('bucket', 'Bucket', 70),
+            ('pred_score', 'Pred Score', 100),
+            ('total', 'Total', 55),
+            ('total_range', 'Range', 80),
+            ('edge', 'Edge', 60),
+            ('margin', 'Margin', 65),
         ]
         
         for col_id, heading, width in col_configs:
@@ -597,6 +598,54 @@ class NBAPredictor(tk.Tk):
             padx=8, pady=2
         )
         self.factor_bucket_label.pack()
+        
+        # Totals summary bar
+        totals_bar = tk.Frame(container, bg=COLORS['bg'], padx=10, pady=8)
+        totals_bar.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        # Predicted score
+        score_frame = tk.Frame(totals_bar, bg=COLORS['bg'])
+        score_frame.pack(side=tk.LEFT, padx=(0, 20))
+        
+        tk.Label(score_frame, text="Pred Score:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_pred_score_var = tk.StringVar(value="-- - --")
+        tk.Label(score_frame, textvariable=self.factor_pred_score_var,
+                font=('Segoe UI', 10, 'bold'), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Total with range
+        total_frame = tk.Frame(totals_bar, bg=COLORS['bg'])
+        total_frame.pack(side=tk.LEFT, padx=(0, 20))
+        
+        tk.Label(total_frame, text="Total:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_total_var = tk.StringVar(value="--")
+        tk.Label(total_frame, textvariable=self.factor_total_var,
+                font=('Segoe UI', 10, 'bold'), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Expected possessions
+        poss_frame = tk.Frame(totals_bar, bg=COLORS['bg'])
+        poss_frame.pack(side=tk.LEFT, padx=(0, 20))
+        
+        tk.Label(poss_frame, text="Exp Poss:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_poss_var = tk.StringVar(value="--")
+        tk.Label(poss_frame, textvariable=self.factor_poss_var,
+                font=('Segoe UI', 10), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # PPPs
+        ppp_frame = tk.Frame(totals_bar, bg=COLORS['bg'])
+        ppp_frame.pack(side=tk.LEFT)
+        
+        tk.Label(ppp_frame, text="PPP:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_ppp_var = tk.StringVar(value="-- / --")
+        tk.Label(ppp_frame, textvariable=self.factor_ppp_var,
+                font=('Segoe UI', 10), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
         
         # Factors tree
         tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
@@ -989,6 +1038,16 @@ class NBAPredictor(tk.Tk):
                     confidence_bucket=bucket_short,
                     model_prob=score.confidence,
                     edge_score=score.edge_score_total,
+                    # Totals prediction fields
+                    pred_away_pts=score.display_away_points,
+                    pred_home_pts=score.display_home_points,
+                    pred_total=score.display_total,
+                    total_range_low=round(score.total_range_low),
+                    total_range_high=round(score.total_range_high),
+                    expected_pace=score.expected_possessions,
+                    ppp_away=score.ppp_away,
+                    ppp_home=score.ppp_home,
+                    variance_band=score.totals_band_width,
                 )
                 entries.append(entry)
             
@@ -1028,7 +1087,7 @@ class NBAPredictor(tk.Tk):
             self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
     
     def update_predictions_display(self):
-        """Update the predictions treeview with confidence display."""
+        """Update the predictions treeview with confidence and totals display."""
         # Clear existing
         for item in self.pred_tree.get_children():
             self.pred_tree.delete(item)
@@ -1038,6 +1097,9 @@ class NBAPredictor(tk.Tk):
             matchup = f"{score.away_team} @ {score.home_team}"
             pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
             conf_bucket = score.confidence_bucket
+            
+            # Format predicted score
+            pred_score = f"{score.display_away_points}-{score.display_home_points}"
             
             # Determine tag
             tag = conf_bucket.lower()
@@ -1050,9 +1112,10 @@ class NBAPredictor(tk.Tk):
                 pick_side,
                 f"{score.confidence_pct_value:.1f}%",
                 conf_bucket,
+                pred_score,
+                score.display_total,
+                score.display_total_range,
                 f"{score.edge_score_total:+.1f}",
-                f"{score.home_win_prob:.1%}",
-                f"{score.away_win_prob:.1%}",
                 f"{score.projected_margin_home:+.1f}",
             ), tags=(tag,))
     
@@ -1139,6 +1202,18 @@ class NBAPredictor(tk.Tk):
                 self.factor_bucket_label.config(
                     text=bucket,
                     bg=bucket_colors.get(bucket, COLORS['text_muted'])
+                )
+                
+                # Update totals summary
+                self.factor_pred_score_var.set(
+                    f"{score.away_team} {score.display_away_points} - "
+                    f"{score.home_team} {score.display_home_points}"
+                )
+                self.factor_total_var.set(score.display_total_with_range)
+                self.factor_poss_var.set(f"{score.expected_possessions:.1f}")
+                self.factor_ppp_var.set(
+                    f"{score.away_team} {score.ppp_away:.3f} / "
+                    f"{score.home_team} {score.ppp_home:.3f}"
                 )
                 
                 # Display factors

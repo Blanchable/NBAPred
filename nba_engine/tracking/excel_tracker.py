@@ -44,10 +44,19 @@ LOG_COLUMNS = [
     "Bucket",             # H - HIGH/MED/LOW
     "Model_Prob",         # I - 0-1 probability
     "Edge",               # J - edge score
-    "Away_Score",         # K - user fills
-    "Home_Score",         # L - user fills
-    "Result",             # M - W/L (auto-calc or user fills)
-    "Notes",              # N - optional
+    "Pred_Away",          # K - predicted away points
+    "Pred_Home",          # L - predicted home points
+    "Pred_Total",         # M - predicted total
+    "Total_Low",          # N - total range low
+    "Total_High",         # O - total range high
+    "Exp_Pace",           # P - expected possessions
+    "PPP_Away",           # Q - away PPP
+    "PPP_Home",           # R - home PPP
+    "Var_Band",           # S - variance band width
+    "Act_Away",           # T - actual away score (user fills)
+    "Act_Home",           # U - actual home score (user fills)
+    "Result",             # V - W/L (auto-calc or user fills)
+    "Notes",              # W - optional
 ]
 
 # Colors for bucket conditional formatting
@@ -89,8 +98,21 @@ class PickEntry:
     confidence_bucket: str   # "HIGH", "MED", "LOW"
     model_prob: float        # 0-1 probability
     edge_score: float
-    away_score: str = ""     # Blank - user fills
-    home_score: str = ""     # Blank - user fills
+    
+    # Totals prediction fields
+    pred_away_pts: int = 0      # Predicted away points
+    pred_home_pts: int = 0      # Predicted home points
+    pred_total: int = 0         # Predicted total
+    total_range_low: int = 0    # Total range low
+    total_range_high: int = 0   # Total range high
+    expected_pace: float = 0.0  # Expected possessions
+    ppp_away: float = 0.0       # Away PPP
+    ppp_home: float = 0.0       # Home PPP
+    variance_band: int = 12     # Variance band width
+    
+    # Actual scores (user fills)
+    actual_away: str = ""
+    actual_home: str = ""
     result: str = ""         # W/L - auto-calc or user fills
     notes: str = ""
     
@@ -107,25 +129,34 @@ class PickEntry:
     
     def to_row(self, row_num: int) -> list:
         """Convert to row values with formula for Result column."""
-        # Auto-calc Result formula:
-        # =IF(OR(K{row}="",L{row}=""),"",IF(AND(F{row}="HOME",L{row}>K{row}),"W",IF(AND(F{row}="AWAY",K{row}>L{row}),"W","L")))
-        result_formula = f'=IF(OR(K{row_num}="",L{row_num}=""),"",IF(AND(F{row_num}="HOME",L{row_num}>K{row_num}),"W",IF(AND(F{row_num}="AWAY",K{row_num}>L{row_num}),"W","L")))'
+        # Auto-calc Result formula based on actual scores (columns T and U)
+        # =IF(OR(T{row}="",U{row}=""),"",IF(AND(F{row}="HOME",U{row}>T{row}),"W",IF(AND(F{row}="AWAY",T{row}>U{row}),"W","L")))
+        result_formula = f'=IF(OR(T{row_num}="",U{row_num}=""),"",IF(AND(F{row_num}="HOME",U{row_num}>T{row_num}),"W",IF(AND(F{row_num}="AWAY",T{row_num}>U{row_num}),"W","L")))'
         
         return [
-            self.run_date,
-            self.game_id,
-            self.away_team,
-            self.home_team,
-            self.pick_team,
-            self.pick_side,
-            self.confidence_pct,
-            self.confidence_bucket,
-            round(self.model_prob, 3),
-            round(self.edge_score, 2),
-            self.away_score,
-            self.home_score,
-            result_formula,  # Formula for auto-calc
-            self.notes,
+            self.run_date,          # A
+            self.game_id,           # B
+            self.away_team,         # C
+            self.home_team,         # D
+            self.pick_team,         # E
+            self.pick_side,         # F
+            self.confidence_pct,    # G
+            self.confidence_bucket, # H
+            round(self.model_prob, 3),  # I
+            round(self.edge_score, 2),  # J
+            self.pred_away_pts,     # K
+            self.pred_home_pts,     # L
+            self.pred_total,        # M
+            self.total_range_low,   # N
+            self.total_range_high,  # O
+            round(self.expected_pace, 1),  # P
+            round(self.ppp_away, 3),       # Q
+            round(self.ppp_home, 3),       # R
+            self.variance_band,     # S
+            self.actual_away,       # T
+            self.actual_home,       # U
+            result_formula,         # V - Formula for auto-calc
+            self.notes,             # W
         ]
 
 
@@ -223,18 +254,27 @@ class ExcelTracker:
         column_widths = {
             'A': 12,   # Date
             'B': 12,   # Game_ID
-            'C': 8,    # Away
-            'D': 8,    # Home
-            'E': 8,    # Pick
-            'F': 8,    # Side
-            'G': 10,   # Conf_%
-            'H': 10,   # Bucket
-            'I': 12,   # Model_Prob
-            'J': 10,   # Edge
-            'K': 12,   # Away_Score
-            'L': 12,   # Home_Score
-            'M': 10,   # Result
-            'N': 25,   # Notes
+            'C': 6,    # Away
+            'D': 6,    # Home
+            'E': 6,    # Pick
+            'F': 7,    # Side
+            'G': 8,    # Conf_%
+            'H': 8,    # Bucket
+            'I': 10,   # Model_Prob
+            'J': 7,    # Edge
+            'K': 10,   # Pred_Away
+            'L': 10,   # Pred_Home
+            'M': 10,   # Pred_Total
+            'N': 10,   # Total_Low
+            'O': 10,   # Total_High
+            'P': 10,   # Exp_Pace
+            'Q': 10,   # PPP_Away
+            'R': 10,   # PPP_Home
+            'S': 10,   # Var_Band
+            'T': 10,   # Act_Away
+            'U': 10,   # Act_Home
+            'V': 8,    # Result
+            'W': 20,   # Notes
         }
         for col, width in column_widths.items():
             sheet.column_dimensions[col].width = width
@@ -242,7 +282,7 @@ class ExcelTracker:
         # Set row height for header
         sheet.row_dimensions[1].height = 25
         
-        # Add data validation for Result column (W or L only)
+        # Add data validation for Result column V (W or L only)
         result_dv = DataValidation(
             type="list",
             formula1='"W,L"',
@@ -251,7 +291,7 @@ class ExcelTracker:
         result_dv.error = "Please enter W or L"
         result_dv.errorTitle = "Invalid Result"
         sheet.add_data_validation(result_dv)
-        result_dv.add('M2:M1000')
+        result_dv.add('V2:V1000')
         
         # Enable auto-filter
         sheet.auto_filter.ref = f"A1:{get_column_letter(len(LOG_COLUMNS))}1"
@@ -288,11 +328,11 @@ class ExcelTracker:
             sheet[cell] = label
             sheet[cell].font = label_font
         
-        # Formulas for overall stats (reference LOG sheet)
+        # Formulas for overall stats (reference LOG sheet, Result is column V)
         sheet['B5'] = '=COUNTA(LOG!A:A)-1'  # Total picks
-        sheet['B6'] = '=COUNTIF(LOG!M:M,"W")+COUNTIF(LOG!M:M,"L")'  # Graded
-        sheet['B7'] = '=COUNTIF(LOG!M:M,"W")'  # Wins
-        sheet['B8'] = '=COUNTIF(LOG!M:M,"L")'  # Losses
+        sheet['B6'] = '=COUNTIF(LOG!V:V,"W")+COUNTIF(LOG!V:V,"L")'  # Graded
+        sheet['B7'] = '=COUNTIF(LOG!V:V,"W")'  # Wins
+        sheet['B8'] = '=COUNTIF(LOG!V:V,"L")'  # Losses
         sheet['B9'] = '=IF(B6>0,B7/B6,0)'  # Win Rate
         sheet['B9'].number_format = '0.0%'
         sheet['B10'] = '=B5-B6'  # Pending
@@ -312,38 +352,38 @@ class ExcelTracker:
             cell.fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
             cell.alignment = Alignment(horizontal='center')
         
-        # HIGH row
+        # HIGH row (Result is now column V)
         sheet['A14'] = 'HIGH'
         sheet['A14'].font = COLORS['high_font']
         sheet['A14'].fill = COLORS['high_fill']
         sheet['B14'] = '=COUNTIF(LOG!H:H,"HIGH")'
-        sheet['C14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!M:M<>""))'
-        sheet['D14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!M:M="W"))'
-        sheet['E14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!M:M="L"))'
+        sheet['C14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!V:V<>""))'
+        sheet['D14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!V:V="W"))'
+        sheet['E14'] = '=SUMPRODUCT((LOG!H:H="HIGH")*(LOG!V:V="L"))'
         sheet['F14'] = '=IF(C14>0,D14/C14,0)'
         sheet['F14'].number_format = '0.0%'
         sheet['G14'] = '=B14-C14'
         
-        # MED row
+        # MED row (Result is now column V)
         sheet['A15'] = 'MEDIUM'
         sheet['A15'].font = COLORS['med_font']
         sheet['A15'].fill = COLORS['med_fill']
         sheet['B15'] = '=COUNTIF(LOG!H:H,"MED")+COUNTIF(LOG!H:H,"MEDIUM")'
-        sheet['C15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!M:M<>""))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!M:M<>""))'
-        sheet['D15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!M:M="W"))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!M:M="W"))'
-        sheet['E15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!M:M="L"))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!M:M="L"))'
+        sheet['C15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!V:V<>""))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!V:V<>""))'
+        sheet['D15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!V:V="W"))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!V:V="W"))'
+        sheet['E15'] = '=SUMPRODUCT((LOG!H:H="MED")*(LOG!V:V="L"))+SUMPRODUCT((LOG!H:H="MEDIUM")*(LOG!V:V="L"))'
         sheet['F15'] = '=IF(C15>0,D15/C15,0)'
         sheet['F15'].number_format = '0.0%'
         sheet['G15'] = '=B15-C15'
         
-        # LOW row
+        # LOW row (Result is now column V)
         sheet['A16'] = 'LOW'
         sheet['A16'].font = COLORS['low_font']
         sheet['A16'].fill = COLORS['low_fill']
         sheet['B16'] = '=COUNTIF(LOG!H:H,"LOW")'
-        sheet['C16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!M:M<>""))'
-        sheet['D16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!M:M="W"))'
-        sheet['E16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!M:M="L"))'
+        sheet['C16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!V:V<>""))'
+        sheet['D16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!V:V="W"))'
+        sheet['E16'] = '=SUMPRODUCT((LOG!H:H="LOW")*(LOG!V:V="L"))'
         sheet['F16'] = '=IF(C16>0,D16/C16,0)'
         sheet['F16'].number_format = '0.0%'
         sheet['G16'] = '=B16-C16'
@@ -439,8 +479,8 @@ class ExcelTracker:
             )
         )
         
-        # Result column conditional formatting (column M)
-        result_col = 'M'
+        # Result column conditional formatting (column V)
+        result_col = 'V'
         
         # W - green
         sheet.conditional_formatting.add(
@@ -461,6 +501,10 @@ class ExcelTracker:
                 font=Font(color="9C0006", bold=True)
             )
         )
+        
+        # Bold the predicted total column (column M)
+        for row_idx in range(data_start, data_end + 1):
+            sheet.cell(row=row_idx, column=13).font = Font(bold=True)  # Pred_Total
         
         # Apply row styling
         for row_idx in range(data_start, data_end + 1):
@@ -607,10 +651,10 @@ class ExcelTracker:
         
         # Process each data row
         for row_idx in range(2, log_sheet.max_row + 1):
-            # Get relevant columns (1-indexed: H=8 for bucket, M=13 for result, E=5 for pick)
+            # Get relevant columns (1-indexed: H=8 for bucket, V=22 for result, E=5 for pick)
             bucket = log_sheet.cell(row=row_idx, column=8).value  # H - Bucket
             pick_team = log_sheet.cell(row=row_idx, column=5).value  # E - Pick
-            result = log_sheet.cell(row=row_idx, column=13).value  # M - Result
+            result = log_sheet.cell(row=row_idx, column=22).value  # V - Result
             
             if not bucket or not pick_team:
                 continue

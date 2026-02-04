@@ -26,6 +26,7 @@ from .factor_debug import (
     add_debug_info, clear_debug_info, validate_distinct_stats,
     ensure_distinct_copies, get_debug_summary,
 )
+from .totals_prediction import predict_game_totals, TotalsPrediction
 
 
 # ============================================================================
@@ -158,6 +159,18 @@ class GameScore:
     away_power_rating: float = 0.0
     factors: list[FactorResult] = field(default_factory=list)
     
+    # Totals prediction fields
+    expected_possessions: float = 0.0
+    ppp_home: float = 0.0
+    ppp_away: float = 0.0
+    predicted_home_points: float = 0.0
+    predicted_away_points: float = 0.0
+    predicted_total: float = 0.0
+    total_range_low: float = 0.0
+    total_range_high: float = 0.0
+    variance_score: float = 0.0
+    totals_band_width: int = 12
+    
     @property
     def pick_prob(self) -> float:
         """Get win probability of the predicted winner."""
@@ -216,6 +229,37 @@ class GameScore:
                 parts.append(f"{f.display_name}:{sign}{f.contribution:.1f}")
         
         return ", ".join(parts) if parts else "No factors"
+    
+    # Totals display properties
+    @property
+    def display_home_points(self) -> int:
+        """Rounded home points for display."""
+        return round(self.predicted_home_points)
+    
+    @property
+    def display_away_points(self) -> int:
+        """Rounded away points for display."""
+        return round(self.predicted_away_points)
+    
+    @property
+    def display_total(self) -> int:
+        """Rounded total for display (ensures sum consistency)."""
+        return self.display_home_points + self.display_away_points
+    
+    @property
+    def display_predicted_score(self) -> str:
+        """Formatted predicted score string: 'AWAY 108 - HOME 114'."""
+        return f"{self.away_team} {self.display_away_points} - {self.home_team} {self.display_home_points}"
+    
+    @property
+    def display_total_range(self) -> str:
+        """Formatted total range string: '210-234'."""
+        return f"{round(self.total_range_low)}-{round(self.total_range_high)}"
+    
+    @property
+    def display_total_with_range(self) -> str:
+        """Formatted total with range: '222 (210-234)'."""
+        return f"{self.display_total} ({self.display_total_range})"
 
 
 # ============================================================================
@@ -1155,6 +1199,22 @@ def score_game_v3(
     home_power = calculate_power_rating(home_adj_net, home_availability)
     away_power = calculate_power_rating(away_adj_net, away_availability)
     
+    # Calculate totals prediction
+    totals = predict_game_totals(
+        home_team=home_team,
+        away_team=away_team,
+        home_stats=home_stats,
+        away_stats=away_stats,
+        predicted_margin=projected_margin,
+        win_prob=confidence,
+        home_rest_days=home_rest_days,
+        away_rest_days=away_rest_days,
+    )
+    
+    # Log totals fallbacks if in debug mode
+    if DEBUG_FACTORS and totals.fallbacks_used:
+        print(f"  [TOTALS_FALLBACKS] {', '.join(totals.fallbacks_used)}")
+    
     return GameScore(
         away_team=away_team,
         home_team=home_team,
@@ -1167,6 +1227,17 @@ def score_game_v3(
         home_power_rating=round(home_power, 1),
         away_power_rating=round(away_power, 1),
         factors=factors,
+        # Totals prediction fields
+        expected_possessions=round(totals.expected_possessions, 1),
+        ppp_home=round(totals.ppp_home, 3),
+        ppp_away=round(totals.ppp_away, 3),
+        predicted_home_points=totals.predicted_home_points,
+        predicted_away_points=totals.predicted_away_points,
+        predicted_total=totals.predicted_total,
+        total_range_low=totals.total_range_low,
+        total_range_high=totals.total_range_high,
+        variance_score=round(totals.variance_score, 2),
+        totals_band_width=totals.band_width,
     )
 
 
