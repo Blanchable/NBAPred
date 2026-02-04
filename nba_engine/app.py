@@ -2,152 +2,207 @@
 """
 NBA Prediction Engine v3 - GUI Application
 
-Lineup-aware, matchup-sensitive NBA pregame predictions with:
-- Player availability impact
-- Home/road performance splits
-- 20-factor weighted scoring system
-- Power ratings for quick comparison
-- Confidence levels (high/medium/low)
+Features:
+- Run today's predictions with one click
+- Excel tracking with overwrite-by-day
+- Winrate dashboard by confidence level
+- Manual result entry via Excel file
+
+NOTE: This engine ONLY supports today's slate. No historical modes.
 """
 
+import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox
 from datetime import datetime
 from pathlib import Path
-import sys
-
-# Add the current directory to path for imports
-if getattr(sys, 'frozen', False):
-    APP_DIR = Path(sys.executable).parent
-else:
-    APP_DIR = Path(__file__).parent
-
-sys.path.insert(0, str(APP_DIR))
-
-from ingest.schedule import get_todays_games, get_current_season
-from ingest.team_stats import get_comprehensive_team_stats, get_team_rest_days, get_fallback_team_strength
-from ingest.player_stats import get_player_stats
-from ingest.injuries import find_latest_injury_pdf, download_injury_pdf, parse_injury_pdf
-from model.lineup_adjustment import calculate_lineup_adjusted_strength
-from model.point_system import score_game_v3, GameScore
-from model.asof import get_data_confidence
-
-# Import new utilities
-from utils.dates import get_eastern_date, format_date, parse_date, enforce_date_limit, is_today
-from utils.storage import (
-    PredictionLogEntry,
-    append_predictions,
-    export_daily_predictions,
-    compute_performance_summary,
-    save_performance_summary,
-    OUTPUTS_DIR,
-)
-from jobs.results import update_results_for_date
 
 
 class NBAPredictor(tk.Tk):
-    """Main application window for NBA Prediction Engine v3."""
+    """Main application window for NBA Prediction Engine."""
     
     def __init__(self):
         super().__init__()
         
-        self.title("NBA Prediction Engine v3 - Lineup-Aware")
+        self.title("NBA Prediction Engine v3")
         self.geometry("1200x800")
-        self.minsize(1000, 650)
+        self.minsize(1000, 700)
         
-        # Configure style
-        self.style = ttk.Style()
-        self.style.theme_use('clam')
+        # Data storage
+        self.scores = []
+        self.injuries = []
+        self.team_stats = {}
         
-        self.configure(bg='#2d2d44')
-        self.style.configure('TFrame', background='#2d2d44')
-        self.style.configure('TLabel', background='#2d2d44', foreground='#ffffff')
-        self.style.configure('TButton', padding=10, font=('Segoe UI', 11))
-        self.style.configure('Header.TLabel', font=('Segoe UI', 24, 'bold'), foreground='#ff6b35')
-        self.style.configure('SubHeader.TLabel', font=('Segoe UI', 14), foreground='#cccccc')
-        self.style.configure('Status.TLabel', font=('Segoe UI', 10), foreground='#aaaaaa')
+        # Configure styles
+        self.setup_styles()
         
-        self.style.configure('Treeview',
-            background='#ffffff',
-            foreground='#000000',
-            fieldbackground='#ffffff',
+        # Create UI
+        self.create_widgets()
+        
+        # Load initial winrate stats
+        self.refresh_winrates()
+    
+    def setup_styles(self):
+        """Configure ttk styles."""
+        style = ttk.Style()
+        
+        # Main button style
+        style.configure(
+            'Main.TButton',
+            font=('Segoe UI', 11, 'bold'),
+            padding=(15, 8)
+        )
+        
+        # Secondary button style
+        style.configure(
+            'Secondary.TButton',
             font=('Segoe UI', 10),
-            rowheight=28
-        )
-        self.style.configure('Treeview.Heading',
-            background='#4a4a6a',
-            foreground='#ffffff',
-            font=('Segoe UI', 10, 'bold')
-        )
-        self.style.map('Treeview',
-            background=[('selected', '#0078d4')],
-            foreground=[('selected', '#ffffff')]
+            padding=(10, 5)
         )
         
-        # Main container
-        self.main_frame = ttk.Frame(self, padding=20)
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        # Status label
+        style.configure(
+            'Status.TLabel',
+            font=('Segoe UI', 10),
+            foreground='#666666'
+        )
+        
+        # Winrate display
+        style.configure(
+            'Winrate.TLabel',
+            font=('Segoe UI', 11, 'bold'),
+        )
         
         # Header
+        style.configure(
+            'Header.TLabel',
+            font=('Segoe UI', 14, 'bold'),
+        )
+    
+    def create_widgets(self):
+        """Create all UI widgets."""
+        # Main container
+        self.main_frame = ttk.Frame(self, padding=10)
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Header frame
         header_frame = ttk.Frame(self.main_frame)
         header_frame.pack(fill=tk.X, pady=(0, 10))
         
-        ttk.Label(header_frame, text="🏀 NBA Prediction Engine v3", style='Header.TLabel').pack(side=tk.LEFT)
-        ttk.Label(header_frame, text=datetime.now().strftime("%A, %B %d, %Y"), style='SubHeader.TLabel').pack(side=tk.RIGHT, pady=10)
+        ttk.Label(
+            header_frame,
+            text="NBA Prediction Engine v3",
+            style='Header.TLabel'
+        ).pack(side=tk.LEFT)
         
-        # Buttons - Row 1: Today's predictions
-        button_frame1 = ttk.Frame(self.main_frame)
-        button_frame1.pack(fill=tk.X, pady=5)
+        # Date display
+        self.date_var = tk.StringVar(value=datetime.now().strftime("%A, %B %d, %Y"))
+        ttk.Label(
+            header_frame,
+            textvariable=self.date_var,
+            style='Status.TLabel'
+        ).pack(side=tk.RIGHT)
         
-        self.fetch_button = ttk.Button(button_frame1, text="🔄 Fetch Today's Predictions", command=self.start_fetch)
-        self.fetch_button.pack(side=tk.LEFT)
+        # Button frame
+        button_frame = ttk.Frame(self.main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
         
-        self.save_button = ttk.Button(button_frame1, text="💾 Save to CSV", command=self.save_to_csv, state=tk.DISABLED)
-        self.save_button.pack(side=tk.LEFT, padx=10)
+        # Run button
+        self.run_button = ttk.Button(
+            button_frame,
+            text="▶ Run Today's Predictions",
+            command=self.start_prediction_run,
+            style='Main.TButton'
+        )
+        self.run_button.pack(side=tk.LEFT, padx=5)
         
-        self.update_results_button = ttk.Button(button_frame1, text="📊 Update Results", command=self.start_update_results)
-        self.update_results_button.pack(side=tk.LEFT, padx=10)
+        # Refresh winrates button
+        self.refresh_button = ttk.Button(
+            button_frame,
+            text="🔄 Refresh Winrates",
+            command=self.refresh_winrates,
+            style='Secondary.TButton'
+        )
+        self.refresh_button.pack(side=tk.LEFT, padx=5)
         
-        self.export_excel_button = ttk.Button(button_frame1, text="📋 Export to Excel", command=self.export_to_excel)
-        self.export_excel_button.pack(side=tk.LEFT, padx=10)
+        # Open Excel button
+        self.open_excel_button = ttk.Button(
+            button_frame,
+            text="📂 Open Tracking File",
+            command=self.open_tracking_file,
+            style='Secondary.TButton'
+        )
+        self.open_excel_button.pack(side=tk.LEFT, padx=5)
         
-        self.status_var = tk.StringVar(value="Click 'Fetch Today's Predictions' to start")
-        ttk.Label(button_frame1, textvariable=self.status_var, style='Status.TLabel').pack(side=tk.RIGHT)
+        # Status label
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(
+            button_frame,
+            textvariable=self.status_var,
+            style='Status.TLabel'
+        ).pack(side=tk.RIGHT, padx=10)
         
-        # Buttons - Row 2: Historical analysis
-        button_frame2 = ttk.Frame(self.main_frame)
-        button_frame2.pack(fill=tk.X, pady=5)
+        # Winrate display frame
+        winrate_frame = ttk.LabelFrame(self.main_frame, text="Performance Dashboard", padding=10)
+        winrate_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Label(button_frame2, text="Historical Date:", style='TLabel').pack(side=tk.LEFT)
+        # Overall winrate
+        overall_frame = ttk.Frame(winrate_frame)
+        overall_frame.pack(side=tk.LEFT, padx=20)
         
-        # Date entry
-        self.date_var = tk.StringVar(value=format_date(get_eastern_date()))
-        self.date_entry = ttk.Entry(button_frame2, textvariable=self.date_var, width=12)
-        self.date_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(overall_frame, text="OVERALL", style='Winrate.TLabel').pack()
+        self.overall_winrate_var = tk.StringVar(value="--")
+        ttk.Label(overall_frame, textvariable=self.overall_winrate_var, font=('Segoe UI', 20, 'bold')).pack()
+        self.overall_record_var = tk.StringVar(value="0-0")
+        ttk.Label(overall_frame, textvariable=self.overall_record_var, style='Status.TLabel').pack()
         
-        self.historical_button = ttk.Button(button_frame2, text="🕐 Run Historical", command=self.start_historical)
-        self.historical_button.pack(side=tk.LEFT, padx=5)
+        # HIGH confidence
+        high_frame = ttk.Frame(winrate_frame)
+        high_frame.pack(side=tk.LEFT, padx=20)
         
-        ttk.Separator(button_frame2, orient='vertical').pack(side=tk.LEFT, padx=10, fill='y')
+        ttk.Label(high_frame, text="HIGH", style='Winrate.TLabel', foreground='green').pack()
+        self.high_winrate_var = tk.StringVar(value="--")
+        ttk.Label(high_frame, textvariable=self.high_winrate_var, font=('Segoe UI', 18, 'bold'), foreground='green').pack()
+        self.high_record_var = tk.StringVar(value="0-0")
+        ttk.Label(high_frame, textvariable=self.high_record_var, style='Status.TLabel').pack()
         
-        self.season_backfill_button = ttk.Button(button_frame2, text="📅 Full Season Backfill", command=self.start_season_backfill)
-        self.season_backfill_button.pack(side=tk.LEFT, padx=5)
+        # MEDIUM confidence
+        medium_frame = ttk.Frame(winrate_frame)
+        medium_frame.pack(side=tk.LEFT, padx=20)
         
-        # Performance summary label
-        self.perf_var = tk.StringVar(value="")
-        ttk.Label(button_frame2, textvariable=self.perf_var, style='Status.TLabel').pack(side=tk.RIGHT, padx=10)
+        ttk.Label(medium_frame, text="MEDIUM", style='Winrate.TLabel', foreground='#CC7700').pack()
+        self.medium_winrate_var = tk.StringVar(value="--")
+        ttk.Label(medium_frame, textvariable=self.medium_winrate_var, font=('Segoe UI', 18, 'bold'), foreground='#CC7700').pack()
+        self.medium_record_var = tk.StringVar(value="0-0")
+        ttk.Label(medium_frame, textvariable=self.medium_record_var, style='Status.TLabel').pack()
         
-        # Update performance summary display
-        self.update_performance_display()
+        # LOW confidence
+        low_frame = ttk.Frame(winrate_frame)
+        low_frame.pack(side=tk.LEFT, padx=20)
         
-        # Notebook
+        ttk.Label(low_frame, text="LOW", style='Winrate.TLabel', foreground='red').pack()
+        self.low_winrate_var = tk.StringVar(value="--")
+        ttk.Label(low_frame, textvariable=self.low_winrate_var, font=('Segoe UI', 18, 'bold'), foreground='red').pack()
+        self.low_record_var = tk.StringVar(value="0-0")
+        ttk.Label(low_frame, textvariable=self.low_record_var, style='Status.TLabel').pack()
+        
+        # Pending
+        pending_frame = ttk.Frame(winrate_frame)
+        pending_frame.pack(side=tk.LEFT, padx=20)
+        
+        ttk.Label(pending_frame, text="PENDING", style='Winrate.TLabel', foreground='#666666').pack()
+        self.pending_var = tk.StringVar(value="0")
+        ttk.Label(pending_frame, textvariable=self.pending_var, font=('Segoe UI', 18, 'bold'), foreground='#666666').pack()
+        ttk.Label(pending_frame, text="awaiting results", style='Status.TLabel').pack()
+        
+        # Notebook for tabs
         self.notebook = ttk.Notebook(self.main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True, pady=10)
         
         # Predictions tab
         self.predictions_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.predictions_frame, text="📊 Predictions")
+        self.notebook.add(self.predictions_frame, text="📊 Today's Predictions")
         self.create_predictions_tree()
         
         # Factors tab
@@ -160,294 +215,384 @@ class NBAPredictor(tk.Tk):
         self.notebook.add(self.injuries_frame, text="🏥 Injuries")
         self.create_injuries_tree()
         
-        # Team Stats tab
-        self.stats_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.stats_frame, text="📋 Team Stats")
-        self.create_stats_view()
-        
         # Log tab
         self.log_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.log_frame, text="📝 Log")
-        self.log_text = scrolledtext.ScrolledText(self.log_frame, wrap=tk.WORD, font=('Consolas', 10), bg='#1e1e2e', fg='#50fa7b')
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Data storage
-        self.scores = []
-        self.injuries = []
-        self.team_stats = {}
-        
-        # Progress bar
-        self.progress = ttk.Progressbar(self.main_frame, mode='indeterminate', length=300)
-        
+        self.create_log_view()
+    
     def create_predictions_tree(self):
         """Create the predictions treeview."""
-        tree_frame = ttk.Frame(self.predictions_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        columns = (
+            'matchup', 'pick', 'side', 'confidence', 'edge', 
+            'home_prob', 'away_prob', 'margin'
+        )
         
-        scrollbar = ttk.Scrollbar(tree_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.pred_tree = ttk.Treeview(
+            self.predictions_frame,
+            columns=columns,
+            show='headings',
+            selectmode='browse'
+        )
         
-        columns = ('matchup', 'pick', 'conf', 'power', 'edge', 'home_prob', 'away_prob', 'margin', 'top_factors')
-        self.pred_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', yscrollcommand=scrollbar.set)
-        
+        # Configure columns
         self.pred_tree.heading('matchup', text='Matchup')
-        self.pred_tree.heading('pick', text='PICK')
-        self.pred_tree.heading('conf', text='Conf')
-        self.pred_tree.heading('power', text='Power')
+        self.pred_tree.heading('pick', text='Pick')
+        self.pred_tree.heading('side', text='Side')
+        self.pred_tree.heading('confidence', text='Confidence')
         self.pred_tree.heading('edge', text='Edge')
         self.pred_tree.heading('home_prob', text='Home %')
         self.pred_tree.heading('away_prob', text='Away %')
         self.pred_tree.heading('margin', text='Margin')
-        self.pred_tree.heading('top_factors', text='Top Factors')
         
-        self.pred_tree.column('matchup', width=110, anchor='center')
-        self.pred_tree.column('pick', width=55, anchor='center')
-        self.pred_tree.column('conf', width=55, anchor='center')
-        self.pred_tree.column('power', width=75, anchor='center')
-        self.pred_tree.column('edge', width=60, anchor='center')
-        self.pred_tree.column('home_prob', width=65, anchor='center')
-        self.pred_tree.column('away_prob', width=65, anchor='center')
-        self.pred_tree.column('margin', width=60, anchor='center')
-        self.pred_tree.column('top_factors', width=400, anchor='w')
+        self.pred_tree.column('matchup', width=150, anchor='center')
+        self.pred_tree.column('pick', width=80, anchor='center')
+        self.pred_tree.column('side', width=80, anchor='center')
+        self.pred_tree.column('confidence', width=100, anchor='center')
+        self.pred_tree.column('edge', width=80, anchor='center')
+        self.pred_tree.column('home_prob', width=80, anchor='center')
+        self.pred_tree.column('away_prob', width=80, anchor='center')
+        self.pred_tree.column('margin', width=80, anchor='center')
         
-        self.pred_tree.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.pred_tree.yview)
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(self.predictions_frame, orient=tk.VERTICAL, command=self.pred_tree.yview)
+        self.pred_tree.configure(yscrollcommand=scrollbar.set)
         
-        # Tags
-        self.pred_tree.tag_configure('high_conf', background='#d4edda', foreground='#155724')
-        self.pred_tree.tag_configure('medium_conf', background='#fff3cd', foreground='#856404')
-        self.pred_tree.tag_configure('low_conf', background='#f8d7da', foreground='#721c24')
-        
-    def create_factors_view(self):
-        """Create the factors breakdown view."""
-        selector_frame = ttk.Frame(self.factors_frame)
-        selector_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Label(selector_frame, text="Select Game:", foreground='#ffffff').pack(side=tk.LEFT)
-        self.game_selector = ttk.Combobox(selector_frame, state='readonly', width=30)
-        self.game_selector.pack(side=tk.LEFT, padx=10)
-        self.game_selector.bind('<<ComboboxSelected>>', self.on_game_selected)
-        
-        tree_frame = ttk.Frame(self.factors_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        scrollbar = ttk.Scrollbar(tree_frame)
+        self.pred_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        columns = ('factor', 'weight', 'signed', 'contribution', 'inputs')
-        self.factors_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', yscrollcommand=scrollbar.set)
+        # Bind selection
+        self.pred_tree.bind('<<TreeviewSelect>>', self.on_prediction_selected)
+        
+        # Configure row colors
+        self.pred_tree.tag_configure('high', background='#E8F5E9')
+        self.pred_tree.tag_configure('medium', background='#FFF3E0')
+        self.pred_tree.tag_configure('low', background='#FFEBEE')
+    
+    def create_factors_view(self):
+        """Create the factor breakdown view."""
+        # Game selector
+        selector_frame = ttk.Frame(self.factors_frame)
+        selector_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(selector_frame, text="Select Game:").pack(side=tk.LEFT, padx=5)
+        
+        self.game_selector_var = tk.StringVar()
+        self.game_selector = ttk.Combobox(
+            selector_frame,
+            textvariable=self.game_selector_var,
+            state='readonly',
+            width=30
+        )
+        self.game_selector.pack(side=tk.LEFT, padx=5)
+        self.game_selector.bind('<<ComboboxSelected>>', self.on_game_selected)
+        
+        # Factors tree
+        columns = ('factor', 'weight', 'signed_value', 'contribution', 'inputs')
+        
+        self.factors_tree = ttk.Treeview(
+            self.factors_frame,
+            columns=columns,
+            show='headings',
+            selectmode='browse'
+        )
         
         self.factors_tree.heading('factor', text='Factor')
         self.factors_tree.heading('weight', text='Weight')
-        self.factors_tree.heading('signed', text='Signed')
-        self.factors_tree.heading('contribution', text='Contrib')
+        self.factors_tree.heading('signed_value', text='Signed Value')
+        self.factors_tree.heading('contribution', text='Contribution')
         self.factors_tree.heading('inputs', text='Inputs Used')
         
-        self.factors_tree.column('factor', width=150, anchor='w')
-        self.factors_tree.column('weight', width=60, anchor='center')
-        self.factors_tree.column('signed', width=70, anchor='center')
-        self.factors_tree.column('contribution', width=70, anchor='center')
-        self.factors_tree.column('inputs', width=450, anchor='w')
+        self.factors_tree.column('factor', width=200)
+        self.factors_tree.column('weight', width=80, anchor='center')
+        self.factors_tree.column('signed_value', width=100, anchor='center')
+        self.factors_tree.column('contribution', width=100, anchor='center')
+        self.factors_tree.column('inputs', width=400)
         
-        self.factors_tree.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.factors_tree.yview)
+        scrollbar = ttk.Scrollbar(self.factors_frame, orient=tk.VERTICAL, command=self.factors_tree.yview)
+        self.factors_tree.configure(yscrollcommand=scrollbar.set)
         
-        self.factors_tree.tag_configure('positive', background='#d4edda', foreground='#155724')
-        self.factors_tree.tag_configure('negative', background='#f8d7da', foreground='#721c24')
-        self.factors_tree.tag_configure('neutral', background='#ffffff', foreground='#333333')
+        self.factors_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
+        # Color tags
+        self.factors_tree.tag_configure('positive', foreground='green')
+        self.factors_tree.tag_configure('negative', foreground='red')
+        self.factors_tree.tag_configure('neutral', foreground='gray')
+    
     def create_injuries_tree(self):
         """Create the injuries treeview."""
-        tree_frame = ttk.Frame(self.injuries_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        scrollbar = ttk.Scrollbar(tree_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
         columns = ('team', 'player', 'status', 'reason')
-        self.inj_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', yscrollcommand=scrollbar.set)
         
-        self.inj_tree.heading('team', text='Team')
-        self.inj_tree.heading('player', text='Player')
-        self.inj_tree.heading('status', text='Status')
-        self.inj_tree.heading('reason', text='Reason')
+        self.injuries_tree = ttk.Treeview(
+            self.injuries_frame,
+            columns=columns,
+            show='headings',
+            selectmode='browse'
+        )
         
-        self.inj_tree.column('team', width=80, anchor='center')
-        self.inj_tree.column('player', width=180, anchor='w')
-        self.inj_tree.column('status', width=100, anchor='center')
-        self.inj_tree.column('reason', width=300, anchor='w')
+        self.injuries_tree.heading('team', text='Team')
+        self.injuries_tree.heading('player', text='Player')
+        self.injuries_tree.heading('status', text='Status')
+        self.injuries_tree.heading('reason', text='Reason')
         
-        self.inj_tree.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.inj_tree.yview)
+        self.injuries_tree.column('team', width=80, anchor='center')
+        self.injuries_tree.column('player', width=200)
+        self.injuries_tree.column('status', width=120, anchor='center')
+        self.injuries_tree.column('reason', width=400)
         
-        self.inj_tree.tag_configure('Out', background='#f8d7da', foreground='#721c24')
-        self.inj_tree.tag_configure('Doubtful', background='#ffe5d0', foreground='#8a4500')
-        self.inj_tree.tag_configure('Questionable', background='#fff3cd', foreground='#856404')
-        self.inj_tree.tag_configure('Probable', background='#d4edda', foreground='#155724')
+        scrollbar = ttk.Scrollbar(self.injuries_frame, orient=tk.VERTICAL, command=self.injuries_tree.yview)
+        self.injuries_tree.configure(yscrollcommand=scrollbar.set)
         
-    def create_stats_view(self):
-        """Create the team stats view."""
-        selector_frame = ttk.Frame(self.stats_frame)
-        selector_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Label(selector_frame, text="Select Team:", foreground='#ffffff').pack(side=tk.LEFT)
-        self.team_selector = ttk.Combobox(selector_frame, state='readonly', width=30)
-        self.team_selector.pack(side=tk.LEFT, padx=10)
-        self.team_selector.bind('<<ComboboxSelected>>', self.on_team_selected)
-        
-        tree_frame = ttk.Frame(self.stats_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        scrollbar = ttk.Scrollbar(tree_frame)
+        self.injuries_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        columns = ('stat', 'value', 'description')
-        self.stats_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', yscrollcommand=scrollbar.set)
+        # Status color tags
+        self.injuries_tree.tag_configure('out', background='#FFCDD2', foreground='#B71C1C')
+        self.injuries_tree.tag_configure('doubtful', background='#FFE0B2', foreground='#E65100')
+        self.injuries_tree.tag_configure('questionable', background='#FFF9C4', foreground='#F57F17')
+        self.injuries_tree.tag_configure('probable', background='#C8E6C9', foreground='#1B5E20')
+    
+    def create_log_view(self):
+        """Create the log text view."""
+        self.log_text = tk.Text(
+            self.log_frame,
+            wrap=tk.WORD,
+            font=('Consolas', 10),
+            state=tk.DISABLED
+        )
         
-        self.stats_tree.heading('stat', text='Statistic')
-        self.stats_tree.heading('value', text='Value')
-        self.stats_tree.heading('description', text='Description')
+        scrollbar = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
         
-        self.stats_tree.column('stat', width=150, anchor='w')
-        self.stats_tree.column('value', width=100, anchor='center')
-        self.stats_tree.column('description', width=400, anchor='w')
-        
-        self.stats_tree.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.stats_tree.yview)
-        
-        self.stats_tree.tag_configure('good', background='#d4edda', foreground='#155724')
-        self.stats_tree.tag_configure('average', background='#ffffff', foreground='#333333')
-        self.stats_tree.tag_configure('poor', background='#f8d7da', foreground='#721c24')
-        
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
     def log(self, message: str):
-        """Add message to log."""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        """Add a message to the log."""
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"{message}\n")
         self.log_text.see(tk.END)
-        self.update_idletasks()
-        
-    def start_fetch(self):
-        """Start fetching data."""
-        self.fetch_button.config(state=tk.DISABLED)
-        self.save_button.config(state=tk.DISABLED)
-        self.progress.pack(pady=5)
-        self.progress.start(10)
-        self.status_var.set("Fetching data...")
-        
-        # Clear data
-        for tree in [self.pred_tree, self.inj_tree, self.factors_tree, self.stats_tree]:
-            for item in tree.get_children():
-                tree.delete(item)
-        self.game_selector['values'] = []
-        self.team_selector['values'] = []
-        self.log_text.delete(1.0, tk.END)
-        
-        thread = threading.Thread(target=self.fetch_data, daemon=True)
-        thread.start()
-        
-    def fetch_data(self):
-        """Fetch all data (background thread)."""
+        self.log_text.configure(state=tk.DISABLED)
+    
+    def refresh_winrates(self):
+        """Refresh winrate statistics from Excel file."""
         try:
-            # 1. Get games
-            self.log("Fetching today's NBA games...")
-            games, api_date, is_current_date = get_todays_games()
+            from tracking import ExcelTracker
+            
+            tracker = ExcelTracker()
+            stats = tracker.compute_winrate_stats()
+            
+            # Update overall
+            if stats.total_graded > 0:
+                self.overall_winrate_var.set(f"{stats.win_pct:.1f}%")
+                self.overall_record_var.set(f"{stats.wins}-{stats.losses}")
+            else:
+                self.overall_winrate_var.set("--")
+                self.overall_record_var.set("0-0")
+            
+            # Update HIGH
+            if stats.high_graded > 0:
+                self.high_winrate_var.set(f"{stats.high_win_pct:.1f}%")
+                self.high_record_var.set(f"{stats.high_wins}-{stats.high_losses}")
+            else:
+                self.high_winrate_var.set("--")
+                self.high_record_var.set("0-0")
+            
+            # Update MEDIUM
+            if stats.medium_graded > 0:
+                self.medium_winrate_var.set(f"{stats.medium_win_pct:.1f}%")
+                self.medium_record_var.set(f"{stats.medium_wins}-{stats.medium_losses}")
+            else:
+                self.medium_winrate_var.set("--")
+                self.medium_record_var.set("0-0")
+            
+            # Update LOW
+            if stats.low_graded > 0:
+                self.low_winrate_var.set(f"{stats.low_win_pct:.1f}%")
+                self.low_record_var.set(f"{stats.low_wins}-{stats.low_losses}")
+            else:
+                self.low_winrate_var.set("--")
+                self.low_record_var.set("0-0")
+            
+            # Update pending
+            self.pending_var.set(str(stats.pending_total))
+            
+            # Update summary sheet
+            tracker.update_summary_sheet(stats)
+            
+            self.log(f"Winrates refreshed: {stats.wins}/{stats.total_graded} overall, {stats.pending_total} pending")
+            
+        except Exception as e:
+            self.log(f"Error refreshing winrates: {e}")
+    
+    def start_prediction_run(self):
+        """Start the prediction run in a background thread."""
+        self.run_button.config(state=tk.DISABLED)
+        self.status_var.set("Running predictions...")
+        self.log("\n" + "=" * 60)
+        self.log(f"Starting prediction run at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.log("=" * 60)
+        
+        thread = threading.Thread(target=self.run_predictions, daemon=True)
+        thread.start()
+    
+    def run_predictions(self):
+        """Run the prediction engine (background thread)."""
+        try:
+            from ingest.schedule import get_todays_games, get_current_season
+            from ingest.team_stats import (
+                get_comprehensive_team_stats,
+                get_team_rest_days,
+                get_fallback_team_strength,
+            )
+            from ingest.player_stats import get_player_stats, get_fallback_player_stats
+            from ingest.injuries import (
+                find_latest_injury_pdf,
+                download_injury_pdf,
+                parse_injury_pdf,
+            )
+            from ingest.inactives import fetch_all_game_inactives, merge_inactives_with_injuries
+            from ingest.known_absences import load_known_absences, merge_known_absences_with_injuries
+            from ingest.news_absences import fetch_all_news_absences, merge_news_absences_with_injuries
+            from model.lineup_adjustment import calculate_lineup_adjusted_strength
+            from model.point_system import score_game_v3, validate_system
+            from tracking import ExcelTracker, PickEntry
+            
+            # Validate system
+            self.log("\n[1/7] Validating scoring system...")
+            validate_system()
+            self.log("  OK - Weights sum to 100")
+            
+            # Get games
+            self.log("\n[2/7] Fetching today's games...")
+            games = get_todays_games()
             
             if not games:
-                self.log("No games found.")
-                if not is_current_date:
-                    self.log("⚠ API may not have updated yet. Try after 10 AM ET.")
-                self.after(0, self.fetch_complete, False, "No games scheduled")
+                self.log("  No games scheduled for today")
+                self.after(0, lambda: self.status_var.set("No games today"))
+                self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
                 return
             
-            self.log(f"Found {len(games)} games for {api_date}")
+            self.log(f"  Found {len(games)} games")
+            for game in games:
+                self.log(f"    {game.away_team} @ {game.home_team}")
             
-            if not is_current_date:
-                self.log("")
-                self.log("⚠ WARNING: These may be YESTERDAY'S games!")
-                self.log(f"  API Date: {api_date}")
-                self.log("  NBA API typically updates around 6-10 AM ET.")
-                self.log("")
-            
-            for g in games:
-                self.log(f"  {g.away_team} @ {g.home_team}")
-            
-            # 2. Get team stats
-            self.log("\nFetching team statistics...")
+            # Get team stats
+            self.log("\n[3/7] Fetching team statistics...")
             season = get_current_season()
+            team_strength = get_comprehensive_team_stats(season)
+            self.team_stats = team_strength
             
-            try:
-                team_strength = get_comprehensive_team_stats(season=season)
-                if not team_strength:
-                    self.log("  API returned empty, using fallback...")
-                    team_strength = get_fallback_team_strength()
-            except Exception as e:
-                self.log(f"  API error: {e}")
-                self.log("  Using fallback team data...")
-                team_strength = get_fallback_team_strength()
+            team_stats_available = len(team_strength) > 0
             
-            self.team_stats = {k: v.to_dict() if hasattr(v, 'to_dict') else v for k, v in team_strength.items()}
-            self.log(f"Loaded stats for {len(team_strength)} teams")
+            if not team_strength:
+                self.log("  Warning: Using fallback stats")
+                for game in games:
+                    for team in [game.home_team, game.away_team]:
+                        if team not in team_strength:
+                            team_strength[team] = get_fallback_team_strength(team)
+            else:
+                self.log(f"  Loaded stats for {len(team_strength)} teams")
             
-            # 3. Get player stats
-            self.log("\nFetching player statistics...")
-            try:
-                player_stats = get_player_stats(season=season)
-            except:
-                player_stats = {}
-            self.log(f"Loaded players for {len(player_stats)} teams")
+            # Get player stats
+            self.log("\n[4/7] Fetching player statistics...")
+            player_stats = get_player_stats(season)
             
-            # 4. Get rest days
-            self.log("\nCalculating rest days...")
-            teams_playing = list(set([g.away_team for g in games] + [g.home_team for g in games]))
-            try:
-                rest_days = get_team_rest_days(teams_playing, season=season)
-            except:
-                rest_days = {t: 1 for t in teams_playing}
+            player_stats_available = len(player_stats) > 0
             
-            # 5. Get injuries
-            self.log("\nFetching injury report...")
-            output_dir = APP_DIR / "outputs"
-            output_dir.mkdir(exist_ok=True)
-            cache_file = output_dir / "latest_injury_url.txt"
+            if not player_stats:
+                self.log("  Warning: Using fallback player stats")
+                player_stats = get_fallback_player_stats(
+                    [g.home_team for g in games] + [g.away_team for g in games]
+                )
+            else:
+                total_players = sum(len(p) for p in player_stats.values())
+                self.log(f"  Loaded {total_players} players")
             
-            injury_url = find_latest_injury_pdf(cache_file=cache_file)
+            # Get rest days
+            self.log("\n[5/7] Calculating rest days...")
+            rest_days = get_team_rest_days(season)
+            self.log(f"  Calculated for {len(rest_days)} teams")
+            
+            # Get injuries
+            self.log("\n[6/7] Fetching injury data...")
+            injury_url = find_latest_injury_pdf()
+            injuries = []
+            injury_report_available = False
+            
             if injury_url:
-                self.log(f"Found: {injury_url}")
+                self.log(f"  Found injury report")
                 pdf_bytes = download_injury_pdf(injury_url)
                 if pdf_bytes:
-                    self.injuries = parse_injury_pdf(pdf_bytes)
-                    self.log(f"Parsed {len(self.injuries)} injuries")
-            else:
-                self.injuries = []
-                self.log("No injury report found")
+                    injuries = parse_injury_pdf(pdf_bytes)
+                    injury_report_available = True
+                    self.log(f"  Parsed {len(injuries)} entries")
             
-            # 6. Generate predictions
-            self.log("\nGenerating lineup-adjusted predictions...")
-            self.scores = []
+            # Merge additional injury sources
+            known_absences = load_known_absences()
+            if known_absences:
+                injuries = merge_known_absences_with_injuries(injuries, known_absences)
+                self.log(f"  Added {len(known_absences)} manual absences")
+            
+            teams_playing = list(set([g.away_team for g in games] + [g.home_team for g in games]))
+            news_absences = fetch_all_news_absences(teams_playing)
+            if news_absences:
+                injuries = merge_news_absences_with_injuries(injuries, news_absences)
+                self.log(f"  Added {len(news_absences)} ESPN entries")
+            
+            game_ids = [g.game_id for g in games if g.game_id]
+            inactives = {}
+            if game_ids:
+                inactives = fetch_all_game_inactives(game_ids)
+                if inactives:
+                    injuries = merge_inactives_with_injuries(injuries, inactives)
+                    self.log(f"  Merged inactives")
+            
+            self.injuries = injuries
+            
+            # Generate predictions
+            self.log("\n[7/7] Generating predictions...")
+            scores = []
             
             for game in games:
                 home_ts = team_strength.get(game.home_team)
                 away_ts = team_strength.get(game.away_team)
                 
-                if not home_ts or not away_ts:
+                if home_ts is None or away_ts is None:
+                    self.log(f"  Skipping {game.away_team} @ {game.home_team} (missing stats)")
                     continue
                 
                 home_players = player_stats.get(game.home_team, [])
                 away_players = player_stats.get(game.away_team, [])
                 
                 home_lineup = calculate_lineup_adjusted_strength(
-                    game.home_team, home_ts, home_players, self.injuries, True
+                    team=game.home_team,
+                    team_strength=home_ts,
+                    players=home_players,
+                    injuries=injuries,
+                    is_home=True,
+                    inactives=inactives,
+                    injury_report_available=injury_report_available,
                 )
+                
                 away_lineup = calculate_lineup_adjusted_strength(
-                    game.away_team, away_ts, away_players, self.injuries, False
+                    team=game.away_team,
+                    team_strength=away_ts,
+                    players=away_players,
+                    injuries=injuries,
+                    is_home=False,
+                    inactives=inactives,
+                    injury_report_available=injury_report_available,
                 )
+                
+                home_rest = rest_days.get(game.home_team, 1)
+                away_rest = rest_days.get(game.away_team, 1)
                 
                 home_stats = home_ts.to_dict() if hasattr(home_ts, 'to_dict') else home_ts
                 away_stats = away_ts.to_dict() if hasattr(away_ts, 'to_dict') else away_ts
                 
-                # Filter injuries by team for star impact calculation
-                home_injuries = [inj for inj in self.injuries if getattr(inj, 'team', '').upper() == game.home_team.upper()]
-                away_injuries = [inj for inj in self.injuries if getattr(inj, 'team', '').upper() == game.away_team.upper()]
+                home_injuries = [inj for inj in injuries if getattr(inj, 'team', '').upper() == game.home_team.upper()]
+                away_injuries = [inj for inj in injuries if getattr(inj, 'team', '').upper() == game.away_team.upper()]
                 
                 score = score_game_v3(
                     home_team=game.home_team,
@@ -456,455 +601,240 @@ class NBAPredictor(tk.Tk):
                     away_strength=away_lineup,
                     home_stats=home_stats,
                     away_stats=away_stats,
-                    home_rest_days=rest_days.get(game.home_team, 1),
-                    away_rest_days=rest_days.get(game.away_team, 1),
+                    home_rest_days=home_rest,
+                    away_rest_days=away_rest,
                     home_players=home_players,
                     away_players=away_players,
                     home_injuries=home_injuries,
                     away_injuries=away_injuries,
                 )
-                self.scores.append(score)
-            
-            # Sort by abs(edge_score_total) (strongest edge first), then by confidence
-            self.scores.sort(key=lambda s: (abs(s.edge_score_total), s.confidence), reverse=True)
-            
-            self.log(f"Generated {len(self.scores)} predictions")
-            
-            # Save predictions to log
-            self.after(0, self.save_predictions_to_log)
-            
-            self.after(0, self.update_ui)
-            self.after(0, self.update_performance_display)
-            self.after(0, self.fetch_complete, True, f"Loaded {len(games)} games")
-            
-        except Exception as e:
-            self.log(f"\nError: {e}")
-            import traceback
-            self.log(traceback.format_exc())
-            self.after(0, self.fetch_complete, False, f"Error: {str(e)[:50]}")
-    
-    def update_ui(self):
-        """Update UI with data."""
-        # Predictions
-        for score in self.scores:
-            matchup = f"{score.away_team} @ {score.home_team}"
-            power = f"{score.away_power_rating:.0f} v {score.home_power_rating:.0f}"
-            
-            # Use confidence label for tag coloring
-            tag = f"{score.confidence_label.lower()}_conf"
-            
-            self.pred_tree.insert('', 'end', values=(
-                matchup, score.predicted_winner, score.confidence_pct,
-                power, f"{score.edge_score_total:+.1f}",
-                f"{score.home_win_prob:.1%}", f"{score.away_win_prob:.1%}",
-                f"{score.projected_margin_home:+.1f}", score.top_5_factors_str
-            ), tags=(tag,))
-        
-        # Game selector
-        game_options = [f"{s.away_team} @ {s.home_team}" for s in self.scores]
-        self.game_selector['values'] = game_options
-        if game_options:
-            self.game_selector.current(0)
-            self.on_game_selected(None)
-        
-        # Team selector
-        teams = sorted(list(set([s.away_team for s in self.scores] + [s.home_team for s in self.scores])))
-        self.team_selector['values'] = teams
-        if teams:
-            self.team_selector.current(0)
-            self.on_team_selected(None)
-        
-        # Injuries
-        for inj in self.injuries:
-            self.inj_tree.insert('', 'end', values=(inj.team, inj.player, inj.status, inj.reason), tags=(inj.status,))
-    
-    def on_game_selected(self, event):
-        """Handle game selection."""
-        for item in self.factors_tree.get_children():
-            self.factors_tree.delete(item)
-        
-        selection = self.game_selector.get()
-        if not selection:
-            return
-        
-        for score in self.scores:
-            if f"{score.away_team} @ {score.home_team}" == selection:
-                for f in sorted(score.factors, key=lambda x: abs(x.contribution), reverse=True):
-                    tag = 'positive' if f.contribution > 0.5 else 'negative' if f.contribution < -0.5 else 'neutral'
-                    self.factors_tree.insert('', 'end', values=(
-                        f.display_name, f.weight, f"{f.signed_value:+.3f}",
-                        f"{f.contribution:+.2f}", f.inputs_used
-                    ), tags=(tag,))
-                break
-    
-    def on_team_selected(self, event):
-        """Handle team selection."""
-        for item in self.stats_tree.get_children():
-            self.stats_tree.delete(item)
-        
-        team = self.team_selector.get()
-        if not team or team not in self.team_stats:
-            return
-        
-        stats = self.team_stats[team]
-        
-        # Define stats with their display format
-        # format: 'pct' = percentage (multiply by 100), 'num' = raw number
-        stat_info = [
-            ('net_rating', 'Net Rating', 'Points per 100 poss differential', 'num'),
-            ('off_rating', 'Offensive Rating', 'Points scored per 100 poss', 'num'),
-            ('def_rating', 'Defensive Rating', 'Points allowed per 100 poss', 'num'),
-            ('home_net_rating', 'Home Net Rating', 'Net rating at home', 'num'),
-            ('road_net_rating', 'Road Net Rating', 'Net rating on road', 'num'),
-            ('pace', 'Pace', 'Possessions per game', 'num'),
-            ('efg_pct', 'Effective FG%', 'Shooting efficiency', 'pct'),
-            ('fg3_pct', '3-Point %', 'Three-point shooting', 'pct'),
-            ('ft_rate', 'Free Throw Rate', 'FTA per FGA', 'num'),
-            ('tov_pct', 'Turnover %', 'Turnovers per possession', 'num'),
-            ('oreb_pct', 'Off Rebound %', 'Offensive rebounding rate', 'num'),
-        ]
-        
-        for key, name, desc, fmt in stat_info:
-            val = stats.get(key, 'N/A')
-            if val != 'N/A':
-                if isinstance(val, (int, float)):
-                    if fmt == 'pct':
-                        # Percentage: show as X.X%
-                        display = f"{val:.1%}" if val <= 1 else f"{val:.1f}%"
-                    else:
-                        # Raw number: show with appropriate precision
-                        display = f"{val:.1f}"
-                else:
-                    display = str(val)
-            else:
-                display = 'N/A'
-            
-            self.stats_tree.insert('', 'end', values=(name, display, desc), tags=('average',))
-    
-    def fetch_complete(self, success: bool, message: str):
-        """Called when fetch completes."""
-        self.progress.stop()
-        self.progress.pack_forget()
-        self.fetch_button.config(state=tk.NORMAL)
-        if success and self.scores:
-            self.save_button.config(state=tk.NORMAL)
-        self.status_var.set(message)
-        
-    def save_to_csv(self):
-        """Save to CSV."""
-        try:
-            import pandas as pd
-            output_dir = APP_DIR / "outputs"
-            output_dir.mkdir(exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            if self.scores:
-                data = [{
-                    "away_team": s.away_team, "home_team": s.home_team,
-                    "predicted_winner": s.predicted_winner, "confidence": s.confidence,
-                    "edge_score": s.edge_score_total, "home_win_prob": s.home_win_prob,
-                    "away_win_prob": s.away_win_prob, "projected_margin": s.projected_margin_home,
-                    "home_power": s.home_power_rating, "away_power": s.away_power_rating,
-                    "top_factors": s.top_5_factors_str
-                } for s in self.scores]
                 
-                pd.DataFrame(data).to_csv(output_dir / f"predictions_{timestamp}.csv", index=False)
-                self.log(f"\nSaved predictions to predictions_{timestamp}.csv")
+                score.game_id = game.game_id
+                scores.append(score)
             
-            if self.injuries:
-                data = [{"team": i.team, "player": i.player, "status": i.status, "reason": i.reason} for i in self.injuries]
-                pd.DataFrame(data).to_csv(output_dir / f"injuries_{timestamp}.csv", index=False)
-                self.log(f"Saved injuries to injuries_{timestamp}.csv")
+            # Sort by confidence
+            scores.sort(key=lambda s: (abs(s.edge_score_total), s.confidence), reverse=True)
+            self.scores = scores
             
-            messagebox.showinfo("Saved", f"Files saved to:\n{output_dir}")
+            self.log(f"\n  Generated {len(scores)} predictions")
             
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save: {e}")
-    
-    def update_performance_display(self):
-        """Update the performance summary display."""
-        try:
-            summary = compute_performance_summary()
-            if summary.total_games > 0:
-                self.perf_var.set(
-                    f"Record: {summary.wins}/{summary.total_games} ({summary.win_pct:.1%}) | "
-                    f"Last 7d: {summary.last_7_days_win_pct:.1%}"
-                )
-            else:
-                self.perf_var.set("")
-        except Exception:
-            self.perf_var.set("")
-    
-    def start_update_results(self):
-        """Start updating results in a background thread."""
-        self.update_results_button.config(state=tk.DISABLED)
-        self.status_var.set("Updating results...")
-        thread = threading.Thread(target=self.update_results_worker, daemon=True)
-        thread.start()
-    
-    def update_results_worker(self):
-        """Worker thread to update results."""
-        try:
-            from jobs.results import update_all_pending_results
+            # Save to Excel
+            self.log("\nSaving to Excel tracking...")
             
-            self.log("\nUpdating results for pending predictions...")
-            updated = update_all_pending_results()
+            now = datetime.now()
+            run_date = now.strftime("%Y-%m-%d")
+            run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             
-            self.log(f"Updated {updated} predictions with results")
-            
-            # Update performance display
-            self.after(0, self.update_performance_display)
-            self.after(0, lambda: self.status_var.set(f"Updated {updated} results"))
-            
-        except Exception as e:
-            self.log(f"\nError updating results: {e}")
-            self.after(0, lambda: self.status_var.set("Error updating results"))
-        finally:
-            self.after(0, lambda: self.update_results_button.config(state=tk.NORMAL))
-    
-    def save_predictions_to_log(self):
-        """Save current predictions to the prediction log."""
-        if not self.scores:
-            return
-        
-        try:
             # Determine data confidence
-            data_confidence = get_data_confidence(
-                team_stats_available=len(self.team_stats) > 0,
-                player_stats_available=True,  # We got player stats
-                injury_report_available=len(self.injuries) > 0,
-            )
+            if team_stats_available and player_stats_available and injury_report_available:
+                data_confidence = "HIGH"
+            elif team_stats_available and injury_report_available:
+                data_confidence = "MEDIUM"
+            else:
+                data_confidence = "LOW"
             
+            # Create entries
             entries = []
-            run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            game_date = format_date(get_eastern_date())
-            
-            for score in self.scores:
-                entry = PredictionLogEntry(
-                    run_timestamp_local=run_timestamp,
-                    game_date=game_date,
-                    game_id="",
+            for score in scores:
+                pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
+                
+                entry = PickEntry(
+                    run_date=run_date,
+                    run_timestamp=run_timestamp,
+                    game_id=getattr(score, 'game_id', ''),
                     away_team=score.away_team,
                     home_team=score.home_team,
-                    pick=score.predicted_winner,
+                    pick_team=score.predicted_winner,
+                    pick_side=pick_side,
+                    confidence_level=score.confidence_label.upper(),
                     edge_score_total=round(score.edge_score_total, 2),
                     projected_margin_home=round(score.projected_margin_home, 1),
                     home_win_prob=round(score.home_win_prob, 3),
                     away_win_prob=round(score.away_win_prob, 3),
-                    confidence_level=score.confidence_label.upper(),
-                    confidence_pct=score.confidence_pct,
                     top_5_factors=score.top_5_factors_str,
-                    injury_report_url="",
                     data_confidence=data_confidence,
                 )
                 entries.append(entry)
             
-            if entries:
-                append_predictions(entries)
-                export_daily_predictions(entries, game_date)
-                self.log(f"Saved {len(entries)} predictions to log")
+            try:
+                tracker = ExcelTracker()
+                saved_count = tracker.save_predictions(entries)
+                self.log(f"  Saved {saved_count} predictions (overwrote any previous for today)")
                 
+                # Update summary
+                stats = tracker.refresh_winrates()
+                self.log(f"  Updated summary sheet")
+                
+            except IOError as e:
+                self.log(f"  ERROR: {e}")
+                self.after(0, lambda: messagebox.showerror(
+                    "File Error",
+                    "Please close NBA_Engine_Tracking.xlsx and try again."
+                ))
+                self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
+                return
+            
+            # Update UI
+            self.after(0, self.update_predictions_display)
+            self.after(0, self.update_injuries_display)
+            self.after(0, self.update_game_selector)
+            self.after(0, self.refresh_winrates)
+            
+            self.after(0, lambda: self.status_var.set(f"Predictions updated for {run_date}"))
+            self.log(f"\n✓ Complete! Predictions saved for {run_date}")
+            
         except Exception as e:
-            self.log(f"Error saving to log: {e}")
+            import traceback
+            self.log(f"\nERROR: {e}")
+            self.log(traceback.format_exc())
+            self.after(0, lambda: self.status_var.set(f"Error: {e}"))
+        finally:
+            self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
     
-    def start_historical(self):
-        """Start historical prediction run for selected date."""
-        date_str = self.date_var.get().strip()
+    def update_predictions_display(self):
+        """Update the predictions treeview."""
+        # Clear existing
+        for item in self.pred_tree.get_children():
+            self.pred_tree.delete(item)
         
-        try:
-            target_date = parse_date(date_str)
-            enforce_date_limit(target_date)
-        except ValueError as e:
-            messagebox.showerror("Invalid Date", str(e))
+        # Add predictions
+        for score in self.scores:
+            matchup = f"{score.away_team} @ {score.home_team}"
+            pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
+            conf_label = score.confidence_label.upper()
+            
+            # Determine tag
+            tag = conf_label.lower()
+            
+            self.pred_tree.insert('', tk.END, values=(
+                matchup,
+                score.predicted_winner,
+                pick_side,
+                conf_label,
+                f"{score.edge_score_total:+.1f}",
+                f"{score.home_win_prob:.1%}",
+                f"{score.away_win_prob:.1%}",
+                f"{score.projected_margin_home:+.1f}",
+            ), tags=(tag,))
+    
+    def update_injuries_display(self):
+        """Update the injuries treeview."""
+        # Clear existing
+        for item in self.injuries_tree.get_children():
+            self.injuries_tree.delete(item)
+        
+        # Add injuries
+        for injury in self.injuries:
+            status = getattr(injury, 'status', 'Unknown')
+            status_lower = status.lower()
+            
+            # Determine tag
+            if 'out' in status_lower:
+                tag = 'out'
+            elif 'doubtful' in status_lower:
+                tag = 'doubtful'
+            elif 'questionable' in status_lower:
+                tag = 'questionable'
+            elif 'probable' in status_lower:
+                tag = 'probable'
+            else:
+                tag = ''
+            
+            self.injuries_tree.insert('', tk.END, values=(
+                getattr(injury, 'team', ''),
+                getattr(injury, 'player', ''),
+                status,
+                getattr(injury, 'reason', ''),
+            ), tags=(tag,) if tag else ())
+    
+    def update_game_selector(self):
+        """Update the game selector combobox."""
+        games = [f"{s.away_team} @ {s.home_team}" for s in self.scores]
+        self.game_selector['values'] = games
+        if games:
+            self.game_selector.current(0)
+            self.on_game_selected(None)
+    
+    def on_prediction_selected(self, event):
+        """Handle prediction selection."""
+        selection = self.pred_tree.selection()
+        if not selection:
             return
         
-        if is_today(target_date):
-            messagebox.showinfo("Info", "For today's predictions, use 'Fetch Today's Predictions' button.")
+        # Get selected matchup
+        item = self.pred_tree.item(selection[0])
+        matchup = item['values'][0]
+        
+        # Find and select in game selector
+        games = list(self.game_selector['values'])
+        if matchup in games:
+            self.game_selector.current(games.index(matchup))
+            self.on_game_selected(None)
+            self.notebook.select(self.factors_frame)
+    
+    def on_game_selected(self, event):
+        """Handle game selection for factor breakdown."""
+        # Clear existing
+        for item in self.factors_tree.get_children():
+            self.factors_tree.delete(item)
+        
+        selected = self.game_selector_var.get()
+        if not selected:
             return
         
-        self.historical_button.config(state=tk.DISABLED)
-        self.status_var.set(f"Running historical analysis for {date_str}...")
-        
-        thread = threading.Thread(target=self.historical_worker, args=(target_date,), daemon=True)
-        thread.start()
+        # Find the matching score
+        for score in self.scores:
+            matchup = f"{score.away_team} @ {score.home_team}"
+            if matchup == selected:
+                # Display factors
+                for factor in score.factors:
+                    # Determine tag
+                    if factor.contribution > 0.5:
+                        tag = 'positive'
+                    elif factor.contribution < -0.5:
+                        tag = 'negative'
+                    else:
+                        tag = 'neutral'
+                    
+                    self.factors_tree.insert('', tk.END, values=(
+                        factor.name,
+                        factor.weight,
+                        f"{factor.signed_value:+.3f}",
+                        f"{factor.contribution:+.2f}",
+                        factor.inputs_used,
+                    ), tags=(tag,))
+                break
     
-    def historical_worker(self, target_date):
-        """Worker thread for historical prediction run."""
-        try:
-            from jobs.backfill import backfill_predictions
-            
-            self.log(f"\n{'='*60}")
-            self.log(f"Running historical analysis for {format_date(target_date)}")
-            self.log(f"{'='*60}")
-            
-            predictions = backfill_predictions(
-                target_date=target_date,
-                fill_results=True,  # Auto-fill results for past games
-                use_cache=True,
+    def open_tracking_file(self):
+        """Open the tracking Excel file."""
+        from tracking import TRACKING_FILE_PATH
+        import subprocess
+        import platform
+        
+        if not TRACKING_FILE_PATH.exists():
+            messagebox.showinfo(
+                "File Not Found",
+                "No tracking file exists yet. Run predictions first."
             )
-            
-            self.log(f"Generated {len(predictions)} predictions")
-            
-            # Update performance display
-            self.after(0, self.update_performance_display)
-            self.after(0, lambda: self.status_var.set(f"Completed historical analysis: {len(predictions)} games"))
-            
-        except Exception as e:
-            self.log(f"\nError in historical analysis: {e}")
-            import traceback
-            self.log(traceback.format_exc())
-            self.after(0, lambda: self.status_var.set("Error in historical analysis"))
-        finally:
-            self.after(0, lambda: self.historical_button.config(state=tk.NORMAL))
-    
-    def start_season_backfill(self):
-        """Start full season backfill."""
-        result = messagebox.askyesno(
-            "Full Season Backfill",
-            "This will run predictions for all games in the current season.\n\n"
-            "This may take several minutes and will make many API calls.\n\n"
-            "Continue?"
-        )
-        
-        if not result:
             return
         
-        self.season_backfill_button.config(state=tk.DISABLED)
-        self.status_var.set("Running full season backfill...")
-        
-        thread = threading.Thread(target=self.season_backfill_worker, daemon=True)
-        thread.start()
-    
-    def season_backfill_worker(self):
-        """Worker thread for full season backfill."""
         try:
-            from jobs.backfill import backfill_predictions
-            from jobs.excel_export import export_predictions_to_excel
-            from utils.dates import get_eastern_date, get_season_for_date, get_date_range
-            from datetime import timedelta
-            import time
+            if platform.system() == 'Windows':
+                import os
+                os.startfile(str(TRACKING_FILE_PATH))
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', str(TRACKING_FILE_PATH)])
+            else:  # Linux
+                subprocess.run(['xdg-open', str(TRACKING_FILE_PATH)])
             
-            today = get_eastern_date()
-            season = get_season_for_date(today)
-            
-            # Determine season start (October of start year)
-            season_start_year = int(season.split("-")[0])
-            season_start = parse_date(f"{season_start_year}-10-22")  # NBA typically starts late October
-            
-            # Limit to past 60 days OR season start, whichever is more recent
-            sixty_days_ago = today - timedelta(days=60)
-            start_date = max(season_start, sixty_days_ago)
-            
-            # End date is yesterday (today's games haven't been played)
-            end_date = today - timedelta(days=1)
-            
-            if start_date > end_date:
-                self.log("No historical dates to backfill")
-                self.after(0, lambda: self.status_var.set("No historical dates to backfill"))
-                return
-            
-            all_dates = get_date_range(start_date, end_date)
-            
-            self.log(f"\n{'#'*60}")
-            self.log(f"SEASON BACKFILL: {season}")
-            self.log(f"Date range: {format_date(start_date)} to {format_date(end_date)}")
-            self.log(f"Total days: {len(all_dates)}")
-            self.log(f"{'#'*60}")
-            
-            total_predictions = 0
-            successful_days = 0
-            failed_days = 0
-            
-            # Process day by day (more reliable than chunks)
-            for i, d in enumerate(all_dates, 1):
-                date_str = format_date(d)
-                self.log(f"\n[{i}/{len(all_dates)}] Processing {date_str}...")
-                self.after(0, lambda ds=date_str, idx=i, total=len(all_dates): 
-                           self.status_var.set(f"Backfilling {ds} ({idx}/{total})..."))
-                
-                try:
-                    predictions = backfill_predictions(
-                        target_date=d,
-                        fill_results=True,
-                        use_cache=True,
-                    )
-                    count = len(predictions)
-                    total_predictions += count
-                    successful_days += 1
-                    self.log(f"  -> {count} predictions")
-                except Exception as e:
-                    failed_days += 1
-                    self.log(f"  -> Error: {e}")
-                
-                # Rate limit between days to avoid API issues
-                if i < len(all_dates):
-                    time.sleep(2)
-            
-            self.log(f"\n{'#'*60}")
-            self.log(f"BACKFILL COMPLETE")
-            self.log(f"  Total predictions: {total_predictions}")
-            self.log(f"  Successful days: {successful_days}")
-            self.log(f"  Failed days: {failed_days}")
-            self.log(f"{'#'*60}")
-            
-            # Export to Excel
-            self.log("\nExporting to Excel...")
-            try:
-                excel_path = export_predictions_to_excel(
-                    title=f"NBA Predictions - {season} Season (Last 60 Days)"
-                )
-                self.log(f"Exported to: {excel_path}")
-                self.after(0, lambda: messagebox.showinfo("Backfill Complete", 
-                    f"Generated {total_predictions} predictions\n"
-                    f"Successful days: {successful_days}\n"
-                    f"Failed days: {failed_days}\n\n"
-                    f"Exported to:\n{excel_path}"))
-            except Exception as e:
-                self.log(f"Error exporting to Excel: {e}")
-            
-            # Update performance summary
-            try:
-                from utils.storage import compute_performance_summary, save_performance_summary
-                summary = compute_performance_summary()
-                save_performance_summary(summary)
-            except Exception as e:
-                self.log(f"Error updating performance summary: {e}")
-            
-            # Update performance display
-            self.after(0, self.update_performance_display)
-            self.after(0, lambda: self.status_var.set(f"Backfill complete: {total_predictions} predictions"))
-            
+            self.log(f"Opened: {TRACKING_FILE_PATH}")
         except Exception as e:
-            self.log(f"\nError in season backfill: {e}")
-            import traceback
-            self.log(traceback.format_exc())
-            self.after(0, lambda: self.status_var.set("Error in season backfill"))
-        finally:
-            self.after(0, lambda: self.season_backfill_button.config(state=tk.NORMAL))
-    
-    def export_to_excel(self):
-        """Export current predictions to Excel."""
-        try:
-            from jobs.excel_export import export_predictions_to_excel
-            from utils.storage import load_predictions_log
-            
-            entries = load_predictions_log()
-            
-            if not entries:
-                messagebox.showwarning("No Data", "No predictions to export. Run some predictions first.")
-                return
-            
-            excel_path = export_predictions_to_excel(entries)
-            
-            self.log(f"\nExported to Excel: {excel_path}")
-            messagebox.showinfo("Exported", f"Predictions exported to:\n{excel_path}")
-            
-        except Exception as e:
-            self.log(f"Error exporting to Excel: {e}")
-            messagebox.showerror("Export Error", f"Failed to export: {e}")
+            self.log(f"Error opening file: {e}")
+            messagebox.showerror("Error", f"Could not open file: {e}")
 
 
 def main():
+    """Main entry point."""
     app = NBAPredictor()
     app.mainloop()
 
