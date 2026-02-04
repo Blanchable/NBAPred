@@ -18,6 +18,14 @@ from dataclasses import dataclass, field
 from math import exp
 from typing import Any, Optional
 import re
+import copy
+import os
+
+from .factor_debug import (
+    DEBUG_FACTORS, DataSource, FactorDebugInfo, StatsWithProvenance,
+    add_debug_info, clear_debug_info, validate_distinct_stats,
+    ensure_distinct_copies, get_debug_summary,
+)
 
 
 # ============================================================================
@@ -123,6 +131,11 @@ class FactorResult:
     signed_value: float  # [-1, +1]
     contribution: float  # weight * signed_value
     inputs_used: str  # Description of inputs
+    # New fields for provenance tracking
+    home_raw: float = 0.0
+    away_raw: float = 0.0
+    home_fallback: bool = False
+    away_fallback: bool = False
 
 
 @dataclass
@@ -246,6 +259,34 @@ def safe_get(stats: dict, key: str, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def safe_get_with_fallback(
+    stats: dict, 
+    key: str, 
+    default: float,
+    team: str = "",
+) -> tuple[float, bool, str]:
+    """
+    Safely get a numeric value from stats dict, tracking if fallback was used.
+    
+    Returns:
+        Tuple of (value, fallback_used, source_description)
+    """
+    val = stats.get(key)
+    
+    if val is None:
+        return default, True, f"fallback({default})"
+    
+    try:
+        float_val = float(val)
+        # Check if value looks like a default/fallback (exact match to common defaults)
+        common_defaults = {0.52, 0.36, 0.40, 0.25, 14.0, 25.0, 100.0, 110.0}
+        is_likely_default = float_val in common_defaults
+        source = "api" if not is_likely_default else f"api({float_val})"
+        return float_val, False, source
+    except (ValueError, TypeError):
+        return default, True, f"fallback({default})"
 
 
 def edge_to_margin(edge_score: float, scale: float = EDGE_TO_MARGIN) -> float:
@@ -487,10 +528,19 @@ def calc_off_vs_def(
 def calc_turnover_diff(
     home_tov_pct: float,
     away_tov_pct: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 4: Turnover Differential (7 points)"""
     delta = away_tov_pct - home_tov_pct  # Lower is better
     signed_value = clamp(delta / SCALES["turnover"])
+    
+    home_str = f"HomeTOV%:{home_tov_pct:.1f}"
+    away_str = f"AwayTOV%:{away_tov_pct:.1f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="turnover_diff",
@@ -498,17 +548,31 @@ def calc_turnover_diff(
         weight=FACTOR_WEIGHTS["turnover_diff"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["turnover_diff"] * signed_value,
-        inputs_used=f"HomeTOV%:{home_tov_pct:.1f} AwayTOV%:{away_tov_pct:.1f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_tov_pct,
+        away_raw=away_tov_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
 def calc_shot_quality(
     home_efg: float,
     away_efg: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 5: Shot Quality (7 points)"""
     delta = (home_efg - away_efg) * 100
     signed_value = clamp(delta / SCALES["shot_quality"])
+    
+    # Build inputs string with fallback indicators
+    home_str = f"HomeEFG:{home_efg:.1%}"
+    away_str = f"AwayEFG:{away_efg:.1%}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="shot_quality",
@@ -516,7 +580,11 @@ def calc_shot_quality(
         weight=FACTOR_WEIGHTS["shot_quality"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["shot_quality"] * signed_value,
-        inputs_used=f"HomeEFG:{home_efg:.1%} AwayEFG:{away_efg:.1%}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_efg,
+        away_raw=away_efg,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -525,6 +593,8 @@ def calc_three_point_edge(
     home_fg3a_rate: float,
     away_fg3_pct: float,
     away_fg3a_rate: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 6: 3P Volume and Accuracy (7 points)"""
     home_score = home_fg3_pct * 100 + home_fg3a_rate * 20
@@ -532,23 +602,43 @@ def calc_three_point_edge(
     delta = home_score - away_score
     signed_value = clamp(delta / SCALES["three_point"])
     
+    home_str = f"Home3P%:{home_fg3_pct:.1%}"
+    away_str = f"Away3P%:{away_fg3_pct:.1%}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
+    
     return FactorResult(
         name="three_point_edge",
         display_name=FACTOR_NAMES["three_point_edge"],
         weight=FACTOR_WEIGHTS["three_point_edge"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["three_point_edge"] * signed_value,
-        inputs_used=f"Home3P%:{home_fg3_pct:.1%} Away3P%:{away_fg3_pct:.1%}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_fg3_pct,
+        away_raw=away_fg3_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
 def calc_free_throw_rate(
     home_ft_rate: float,
     away_ft_rate: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 7: Free Throw Rate (6 points)"""
     delta = home_ft_rate - away_ft_rate
     signed_value = clamp(delta / SCALES["ft_rate"])
+    
+    home_str = f"HomeFTr:{home_ft_rate:.3f}"
+    away_str = f"AwayFTr:{away_ft_rate:.3f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="free_throw_rate",
@@ -556,17 +646,30 @@ def calc_free_throw_rate(
         weight=FACTOR_WEIGHTS["free_throw_rate"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["free_throw_rate"] * signed_value,
-        inputs_used=f"HomeFTr:{home_ft_rate:.3f} AwayFTr:{away_ft_rate:.3f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_ft_rate,
+        away_raw=away_ft_rate,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
 def calc_rebounding(
     home_oreb_pct: float,
     away_oreb_pct: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 8: Rebounding Edge (6 points)"""
     delta = home_oreb_pct - away_oreb_pct
     signed_value = clamp(delta / SCALES["rebounding"])
+    
+    home_str = f"HomeOREB%:{home_oreb_pct:.1f}"
+    away_str = f"AwayOREB%:{away_oreb_pct:.1f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="rebounding",
@@ -574,7 +677,11 @@ def calc_rebounding(
         weight=FACTOR_WEIGHTS["rebounding"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["rebounding"] * signed_value,
-        inputs_used=f"HomeOREB%:{home_oreb_pct:.1f} AwayOREB%:{away_oreb_pct:.1f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_oreb_pct,
+        away_raw=away_oreb_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -650,10 +757,19 @@ def calc_rim_protection(
 def calc_perimeter_defense(
     home_opp_fg3_pct: float,
     away_opp_fg3_pct: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 13: Perimeter Defense (4 points)"""
     delta = (away_opp_fg3_pct - home_opp_fg3_pct) * 100  # Lower is better
     signed_value = clamp(delta / SCALES["perimeter"])
+    
+    home_str = f"HomeOpp3P%:{home_opp_fg3_pct:.1%}"
+    away_str = f"AwayOpp3P%:{away_opp_fg3_pct:.1%}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="perimeter_defense",
@@ -661,7 +777,11 @@ def calc_perimeter_defense(
         weight=FACTOR_WEIGHTS["perimeter_defense"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["perimeter_defense"] * signed_value,
-        inputs_used=f"HomeOpp3P%:{home_opp_fg3_pct:.1%} AwayOpp3P%:{away_opp_fg3_pct:.1%}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_opp_fg3_pct,
+        away_raw=away_opp_fg3_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -708,10 +828,19 @@ def calc_bench_depth(
 def calc_pace_control(
     home_pace: float,
     away_pace: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 16: Pace Control (3 points)"""
     delta = home_pace - away_pace
     signed_value = clamp(delta / SCALES["pace"])
+    
+    home_str = f"HomePace:{home_pace:.1f}"
+    away_str = f"AwayPace:{away_pace:.1f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="pace_control",
@@ -719,7 +848,11 @@ def calc_pace_control(
         weight=FACTOR_WEIGHTS["pace_control"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["pace_control"] * signed_value,
-        inputs_used=f"HomePace:{home_pace:.1f} AwayPace:{away_pace:.1f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_pace,
+        away_raw=away_pace,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -807,6 +940,16 @@ def score_game_v3(
     This version uses lineup-adjusted strengths, home/road splits,
     and the new tiered star impact system.
     """
+    # CRITICAL: Ensure home_stats and away_stats are distinct objects
+    # This prevents shared reference bugs
+    home_stats, away_stats = ensure_distinct_copies(home_stats, away_stats)
+    
+    # Validate stats are distinct (log warnings if issues found)
+    if DEBUG_FACTORS:
+        warnings = validate_distinct_stats(home_team, away_team, home_stats, away_stats)
+        for w in warnings:
+            print(f"  [STATS_VALIDATION] {w}")
+    
     # Extract strength values
     if hasattr(home_strength, 'adjusted_net_rating'):
         home_adj_net = home_strength.adjusted_net_rating
@@ -830,14 +973,49 @@ def score_game_v3(
         away_missing = []
         away_confidence_penalty = 0.0
     
-    # Get stats
-    home_off = safe_get(home_stats, 'off_rating', 110)
-    home_def = safe_get(home_stats, 'def_rating', 110)
-    away_off = safe_get(away_stats, 'off_rating', 110)
-    away_def = safe_get(away_stats, 'def_rating', 110)
+    # Get stats with fallback tracking
+    home_off, home_off_fb, _ = safe_get_with_fallback(home_stats, 'off_rating', 110, home_team)
+    home_def, home_def_fb, _ = safe_get_with_fallback(home_stats, 'def_rating', 110, home_team)
+    away_off, away_off_fb, _ = safe_get_with_fallback(away_stats, 'off_rating', 110, away_team)
+    away_def, away_def_fb, _ = safe_get_with_fallback(away_stats, 'def_rating', 110, away_team)
     
     home_home_net = safe_get(home_stats, 'home_net_rating', home_adj_net + 2)
     away_road_net = safe_get(away_stats, 'road_net_rating', away_adj_net - 2)
+    
+    # Get advanced stats with fallback tracking
+    home_tov, home_tov_fb, _ = safe_get_with_fallback(home_stats, 'tov_pct', 14, home_team)
+    away_tov, away_tov_fb, _ = safe_get_with_fallback(away_stats, 'tov_pct', 14, away_team)
+    
+    home_efg, home_efg_fb, _ = safe_get_with_fallback(home_stats, 'efg_pct', 0.52, home_team)
+    away_efg, away_efg_fb, _ = safe_get_with_fallback(away_stats, 'efg_pct', 0.52, away_team)
+    
+    home_fg3, home_fg3_fb, _ = safe_get_with_fallback(home_stats, 'fg3_pct', 0.36, home_team)
+    away_fg3, away_fg3_fb, _ = safe_get_with_fallback(away_stats, 'fg3_pct', 0.36, away_team)
+    
+    home_fg3a_rate, home_fg3a_fb, _ = safe_get_with_fallback(home_stats, 'fg3a_rate', 0.40, home_team)
+    away_fg3a_rate, away_fg3a_fb, _ = safe_get_with_fallback(away_stats, 'fg3a_rate', 0.40, away_team)
+    
+    home_ft_rate, home_ft_fb, _ = safe_get_with_fallback(home_stats, 'ft_rate', 0.25, home_team)
+    away_ft_rate, away_ft_fb, _ = safe_get_with_fallback(away_stats, 'ft_rate', 0.25, away_team)
+    
+    home_oreb, home_oreb_fb, _ = safe_get_with_fallback(home_stats, 'oreb_pct', 25, home_team)
+    away_oreb, away_oreb_fb, _ = safe_get_with_fallback(away_stats, 'oreb_pct', 25, away_team)
+    
+    home_opp_efg, home_opp_efg_fb, _ = safe_get_with_fallback(home_stats, 'opp_efg_pct', 0.52, home_team)
+    away_opp_efg, away_opp_efg_fb, _ = safe_get_with_fallback(away_stats, 'opp_efg_pct', 0.52, away_team)
+    
+    home_pace, home_pace_fb, _ = safe_get_with_fallback(home_stats, 'pace', 100, home_team)
+    away_pace, away_pace_fb, _ = safe_get_with_fallback(away_stats, 'pace', 100, away_team)
+    
+    # Debug logging for data provenance
+    if DEBUG_FACTORS:
+        print(f"\n[FACTOR_DEBUG] Game: {away_team} @ {home_team}")
+        print(f"[FACTOR_DEBUG] home_stats id={id(home_stats)}, away_stats id={id(away_stats)}")
+        print(f"[FACTOR_DEBUG] Stats comparison:")
+        print(f"  efg_pct: home={home_efg:.4f} (fb={home_efg_fb}) away={away_efg:.4f} (fb={away_efg_fb}) diff={home_efg-away_efg:.4f}")
+        print(f"  tov_pct: home={home_tov:.4f} (fb={home_tov_fb}) away={away_tov:.4f} (fb={away_tov_fb}) diff={home_tov-away_tov:.4f}")
+        print(f"  oreb_pct: home={home_oreb:.4f} (fb={home_oreb_fb}) away={away_oreb:.4f} (fb={away_oreb_fb}) diff={home_oreb-away_oreb:.4f}")
+        print(f"  pace: home={home_pace:.4f} (fb={home_pace_fb}) away={away_pace:.4f} (fb={away_pace_fb}) diff={home_pace-away_pace:.4f}")
     
     factors = []
     
@@ -881,33 +1059,48 @@ def score_game_v3(
             inputs_used="INACTIVE (no player data)",
         ))
     factors.append(calc_off_vs_def(home_off, home_def, away_off, away_def))
-    factors.append(calc_turnover_diff(safe_get(home_stats, 'tov_pct', 14), safe_get(away_stats, 'tov_pct', 14)))
-    factors.append(calc_shot_quality(safe_get(home_stats, 'efg_pct', 0.52), safe_get(away_stats, 'efg_pct', 0.52)))
+    factors.append(calc_turnover_diff(home_tov, away_tov, home_tov_fb, away_tov_fb))
+    factors.append(calc_shot_quality(home_efg, away_efg, home_efg_fb, away_efg_fb))
     factors.append(calc_three_point_edge(
-        safe_get(home_stats, 'fg3_pct', 0.36), safe_get(home_stats, 'fg3a_rate', 0.40),
-        safe_get(away_stats, 'fg3_pct', 0.36), safe_get(away_stats, 'fg3a_rate', 0.40)
+        home_fg3, home_fg3a_rate, away_fg3, away_fg3a_rate,
+        home_fg3_fb or home_fg3a_fb, away_fg3_fb or away_fg3a_fb
     ))
-    factors.append(calc_free_throw_rate(safe_get(home_stats, 'ft_rate', 0.25), safe_get(away_stats, 'ft_rate', 0.25)))
-    factors.append(calc_rebounding(safe_get(home_stats, 'oreb_pct', 25), safe_get(away_stats, 'oreb_pct', 25)))
+    factors.append(calc_free_throw_rate(home_ft_rate, away_ft_rate, home_ft_fb, away_ft_fb))
+    factors.append(calc_rebounding(home_oreb, away_oreb, home_oreb_fb, away_oreb_fb))
     factors.append(calc_home_road_split(home_home_net, away_road_net))
     factors.append(calc_home_court())
     factors.append(calc_rest_fatigue(home_rest_days, away_rest_days))
     factors.append(calc_rim_protection(home_def, away_def))
-    factors.append(calc_perimeter_defense(
-        safe_get(home_stats, 'opp_efg_pct', 0.52), safe_get(away_stats, 'opp_efg_pct', 0.52)
-    ))
+    factors.append(calc_perimeter_defense(home_opp_efg, away_opp_efg, home_opp_efg_fb, away_opp_efg_fb))
     factors.append(calc_matchup_fit(
-        safe_get(home_stats, 'oreb_pct', 25), safe_get(home_stats, 'fg3a_rate', 0.40),
-        safe_get(away_stats, 'oreb_pct', 25), safe_get(away_stats, 'fg3a_rate', 0.40)
+        home_oreb, home_fg3a_rate,
+        away_oreb, away_fg3a_rate
     ))
     factors.append(calc_bench_depth(home_adj_net, away_adj_net))
-    factors.append(calc_pace_control(safe_get(home_stats, 'pace', 100), safe_get(away_stats, 'pace', 100)))
+    factors.append(calc_pace_control(home_pace, away_pace, home_pace_fb, away_pace_fb))
     factors.append(calc_late_game_creation(home_off, away_off))
     factors.append(calc_coaching())
-    factors.append(calc_shooting_variance(
-        safe_get(home_stats, 'fg3a_rate', 0.40), safe_get(away_stats, 'fg3a_rate', 0.40)
-    ))
+    factors.append(calc_shooting_variance(home_fg3a_rate, away_fg3a_rate))
     factors.append(calc_motivation())
+    
+    # Debug: Log factor debug info
+    if DEBUG_FACTORS:
+        for f in factors:
+            if hasattr(f, 'home_raw') and f.home_raw != 0:
+                info = FactorDebugInfo(
+                    factor_name=f.name,
+                    home_team=home_team,
+                    away_team=away_team,
+                    home_raw=f.home_raw,
+                    away_raw=f.away_raw,
+                    home_source=DataSource.FALLBACK_LEAGUE_AVG if f.home_fallback else DataSource.API_SEASON,
+                    away_source=DataSource.FALLBACK_LEAGUE_AVG if f.away_fallback else DataSource.API_SEASON,
+                    home_fallback=f.home_fallback,
+                    away_fallback=f.away_fallback,
+                    signed_value=f.signed_value,
+                    contribution=f.contribution,
+                )
+                add_debug_info(info)
     
     # Sum contributions
     edge_score_total = sum(f.contribution for f in factors)
