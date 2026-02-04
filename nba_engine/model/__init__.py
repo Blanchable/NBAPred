@@ -46,6 +46,19 @@ from .rotation_replacement import (
     get_replacement_candidates,
     REPLACEMENT_EDGE_CLAMP,
 )
+from .totals_prediction import (
+    predict_game_totals,
+    predict_possessions,
+    predict_ppp,
+    predict_points,
+    compute_variance_band,
+    evaluate_totals,
+    TotalsPrediction,
+    TotalsContext,
+    TotalsEvaluation,
+    LEAGUE_AVG_PACE,
+    LEAGUE_AVG_PPP,
+)
 
 __all__ = [
     # Point system
@@ -87,4 +100,16 @@ __all__ = [
     "get_absent_stars",
     "get_replacement_candidates",
     "REPLACEMENT_EDGE_CLAMP",
+    # Totals prediction
+    "predict_game_totals",
+    "predict_possessions",
+    "predict_ppp",
+    "predict_points",
+    "compute_variance_band",
+    "evaluate_totals",
+    "TotalsPrediction",
+    "TotalsContext",
+    "TotalsEvaluation",
+    "LEAGUE_AVG_PACE",
+    "LEAGUE_AVG_PPP",
 ]
