@@ -7,6 +7,14 @@ Manages a single persistent Excel workbook with:
 - SETTINGS sheet: Configuration thresholds and version info
 
 The engine ONLY supports today's slate - no historical/backfill functionality.
+
+IMPORTANT: The tracking file is stored in a PERSISTENT location that survives
+app restarts, including when running as a PyInstaller frozen executable.
+
+Location:
+  Windows: %APPDATA%\\NBA_Engine\\tracking\\NBA_Engine_Tracking.xlsx
+  macOS:   ~/Library/Application Support/NBA_Engine/tracking/
+  Linux:   ~/.local/share/NBA_Engine/tracking/
 """
 
 from dataclasses import dataclass
@@ -14,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
 import os
+import sys
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, NamedStyle
@@ -22,10 +31,14 @@ from openpyxl.formatting.rule import FormulaRule, CellIsRule
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.datavalidation import DataValidation
 
-
-# Constants
-TRACKING_DIR = Path(__file__).parent.parent / "outputs" / "tracking"
-TRACKING_FILE_PATH = TRACKING_DIR / "NBA_Engine_Tracking.xlsx"
+# Import persistent paths from the paths module
+# This ensures the tracking file is written to a stable location
+# that persists even when running as a frozen PyInstaller executable
+from paths import (
+    TRACKING_DIR,
+    TRACKING_FILE_PATH,
+    get_tracking_path_message,
+)
 
 # Sheet names
 LOG_SHEET = "LOG"

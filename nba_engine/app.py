@@ -10,6 +10,12 @@ Features:
 - Modern, clean UI design
 
 NOTE: This engine ONLY supports today's slate. No historical modes.
+
+TRACKING FILE LOCATION:
+The tracking workbook is stored in a persistent location:
+  Windows: %APPDATA%\\NBA_Engine\\tracking\\NBA_Engine_Tracking.xlsx
+  macOS:   ~/Library/Application Support/NBA_Engine/tracking/
+  Linux:   ~/.local/share/NBA_Engine/tracking/
 """
 
 import sys
@@ -18,6 +24,16 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 from pathlib import Path
+
+# Import paths module FIRST to set up persistent storage locations
+# This must be imported before any module that uses tracking paths
+import paths
+from paths import (
+    TRACKING_FILE_PATH,
+    log_startup_diagnostics,
+    get_tracking_path_message,
+    is_frozen,
+)
 
 
 # Try to use ttkbootstrap for modern styling, fallback to plain ttk
@@ -1055,6 +1071,7 @@ class NBAPredictor(tk.Tk):
                 tracker = ExcelTracker()
                 saved_count = tracker.save_predictions(entries)
                 self.log(f"  Saved {saved_count} predictions (overwrote any previous for today)")
+                self.log(f"  {get_tracking_path_message()}")
                 
                 # Update summary
                 stats = tracker.refresh_winrates()
@@ -1237,14 +1254,14 @@ class NBAPredictor(tk.Tk):
     
     def open_tracking_file(self):
         """Open the tracking Excel file."""
-        from tracking import TRACKING_FILE_PATH
+        # Note: TRACKING_FILE_PATH is imported at module level from paths module
         import subprocess
         import platform
         
         if not TRACKING_FILE_PATH.exists():
             messagebox.showinfo(
                 "File Not Found",
-                "No tracking file exists yet. Run predictions first."
+                f"No tracking file exists yet.\nRun predictions first.\n\nExpected location:\n{TRACKING_FILE_PATH}"
             )
             return
         
@@ -1265,6 +1282,14 @@ class NBAPredictor(tk.Tk):
 
 def main():
     """Main entry point."""
+    # Log startup diagnostics (writes to persistent log file)
+    print("\n" + "=" * 60)
+    print("NBA Prediction Engine v3.1")
+    print("=" * 60)
+    log_startup_diagnostics()
+    print(get_tracking_path_message())
+    print("=" * 60 + "\n")
+    
     app = NBAPredictor()
     app.mainloop()
 
