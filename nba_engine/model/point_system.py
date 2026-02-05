@@ -36,21 +36,21 @@ from .totals_prediction import predict_game_totals, TotalsPrediction
 # Factor weights (must sum to 100)
 # V3: Updated with home/road split replacing generic home court
 FACTOR_WEIGHTS = {
-    "lineup_net_rating": 14,     # Lineup-adjusted net rating
+    "lineup_net_rating": 12,     # Lineup-adjusted net rating (reduced: overlaps with off_vs_def + shot_quality)
     "star_impact": 9,            # Tiered star availability (replaces old star_availability)
-    "rotation_replacement": 4,   # Next-man-up quality when star is out
+    "rotation_replacement": 5,   # Next-man-up quality when star is out (increased: injury-driven realism)
     "off_vs_def": 8,             # Offensive vs defensive matchup
     "turnover_diff": 6,          # Ball security
-    "shot_quality": 6,           # eFG% advantage
-    "three_point_edge": 6,       # 3P shooting edge
+    "shot_quality": 5,           # eFG% advantage (reduced: overlaps with net rating/off efficiency)
+    "three_point_edge": 5,       # 3P shooting edge (reduced: overlaps with shot quality and offense)
     "free_throw_rate": 5,        # Getting to the line
-    "rebounding": 5,             # Board control
-    "home_road_split": 5,        # Home/road performance (NEW)
-    "home_court": 4,             # Basic home advantage (reduced)
+    "rebounding": 6,             # Board control (increased: possession control is orthogonal)
+    "home_road_split": 4,        # Home/road performance (reduced: overlaps with home_court)
+    "home_court": 4,             # Basic home advantage
     "rest_fatigue": 5,           # Rest days
-    "rim_protection": 4,         # Interior defense
-    "perimeter_defense": 4,      # Perimeter D
-    "matchup_fit": 3,            # Style matchup (Four Factors)
+    "rim_protection": 5,         # Interior defense (increased: defense impact)
+    "perimeter_defense": 5,      # Perimeter D (increased: defense impact)
+    "matchup_fit": 4,            # Style matchup (increased: style clash underweighted)
     "bench_depth": 4,            # Rotation quality
     "pace_control": 3,           # Tempo
     "late_game_creation": 3,     # Clutch proxy

@@ -151,27 +151,27 @@ nba_engine/
 
 | # | Factor | Weight | Description |
 |---|--------|--------|-------------|
-| 1 | Net Rating | 14 | Overall team strength |
+| 1 | Net Rating | 12 | Overall team strength (lineup-adjusted) |
 | 2 | Star Impact | 9 | Tiered star availability |
-| 3 | Rotation Replacement | 4 | Next-man-up quality |
-| 4 | Off vs Def Efficiency | 8 | Matchup-specific scoring |
-| 5 | Turnover Differential | 6 | Ball security |
-| 6 | Shot Quality | 6 | Effective FG% |
-| 7 | 3P Edge | 6 | Three-point shooting |
-| 8 | Free Throw Rate | 5 | Getting to the line |
-| 9 | Rebounding | 5 | Overall rebounding |
-| 10 | Home/Road Split | 5 | Home vs away performance |
-| 11 | Home Court | 4 | Fixed home advantage |
-| 12 | Rest/Fatigue | 4 | Days since last game |
-| 13 | Rim Protection | 4 | Interior defense |
-| 14 | Perimeter Defense | 4 | Opponent 3P% allowed |
+| 3 | Off vs Def Efficiency | 8 | Matchup-specific scoring |
+| 4 | Turnover Differential | 6 | Ball security |
+| 5 | Rebounding | 6 | Board control (possession) |
+| 6 | Rotation Replacement | 5 | Next-man-up quality |
+| 7 | Shot Quality | 5 | Effective FG% |
+| 8 | 3P Edge | 5 | Three-point shooting |
+| 9 | Free Throw Rate | 5 | Getting to the line |
+| 10 | Rest/Fatigue | 5 | Days since last game |
+| 11 | Rim Protection | 5 | Interior defense |
+| 12 | Perimeter Defense | 5 | Opponent 3P% allowed |
+| 13 | Home/Road Split | 4 | Home vs away performance |
+| 14 | Home Court | 4 | Fixed home advantage |
 | 15 | Matchup Fit | 4 | Style compatibility |
-| 16 | Bench Depth | 3 | Rotation quality |
+| 16 | Bench Depth | 4 | Rotation quality |
 | 17 | Pace Control | 3 | Tempo advantage |
 | 18 | Late Game Creation | 3 | Clutch performance |
-| 19 | Coaching | 2 | Neutral |
-| 20 | Shooting Variance | 3 | 3P reliance |
-| 21 | Motivation | 1 | Neutral |
+| 19 | Shooting Variance | 2 | 3P reliance (variance) |
+| 20 | Coaching | 0 | Neutral (no data) |
+| 21 | Motivation | 0 | Neutral (no data) |
 
 ## Troubleshooting
 
