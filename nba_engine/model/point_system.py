@@ -15,7 +15,7 @@ Total weights sum to 100.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import exp
+from math import exp, tanh
 from typing import Any, Optional
 import re
 import copy
@@ -34,24 +34,27 @@ from .totals_prediction import predict_game_totals, TotalsPrediction
 # ============================================================================
 
 # Factor weights (must sum to 100)
-# V3: Updated with home/road split replacing generic home court
+# V3.1: Rebalanced to reduce overconfidence and double counting
+# - Reduced net rating dominance
+# - Reduced home stacking (home_court + home_road_split)
+# - Increased defense and injury awareness
 FACTOR_WEIGHTS = {
-    "lineup_net_rating": 12,     # Lineup-adjusted net rating (reduced: overlaps with off_vs_def + shot_quality)
-    "star_impact": 9,            # Tiered star availability (replaces old star_availability)
-    "rotation_replacement": 5,   # Next-man-up quality when star is out (increased: injury-driven realism)
-    "off_vs_def": 8,             # Offensive vs defensive matchup
+    "lineup_net_rating": 11,     # Reduced from 14 to prevent saturation dominance
+    "star_impact": 10,           # Slightly higher for injury awareness
+    "rotation_replacement": 5,   # Injury-driven next-man-up quality
+    "off_vs_def": 10,            # Matchup efficiency is important
     "turnover_diff": 6,          # Ball security
-    "shot_quality": 5,           # eFG% advantage (reduced: overlaps with net rating/off efficiency)
-    "three_point_edge": 5,       # 3P shooting edge (reduced: overlaps with shot quality and offense)
+    "shot_quality": 5,           # Reduced to avoid overlap with 3P edge
+    "three_point_edge": 5,       # Reduced to avoid overlap with shot quality
     "free_throw_rate": 5,        # Getting to the line
-    "rebounding": 6,             # Board control (increased: possession control is orthogonal)
-    "home_road_split": 4,        # Home/road performance (reduced: overlaps with home_court)
-    "home_court": 4,             # Basic home advantage
+    "rebounding": 5,             # Board control
+    "home_road_split": 3,        # Reduced to avoid stacking with home_court
+    "home_court": 3,             # Reduced slightly, keep basic home edge
     "rest_fatigue": 5,           # Rest days
-    "rim_protection": 5,         # Interior defense (increased: defense impact)
-    "perimeter_defense": 5,      # Perimeter D (increased: defense impact)
-    "matchup_fit": 4,            # Style matchup (increased: style clash underweighted)
-    "bench_depth": 4,            # Rotation quality
+    "rim_protection": 5,         # Interior defense (increased importance)
+    "perimeter_defense": 5,      # Perimeter D (increased importance)
+    "matchup_fit": 4,            # Style matchups matter
+    "bench_depth": 5,            # Slightly higher, stabilizes outcomes
     "pace_control": 3,           # Tempo
     "late_game_creation": 3,     # Clutch proxy
     "coaching": 0,               # Neutral (no data)
@@ -110,18 +113,19 @@ SCALES = {
 # Edge scores typically range 15-30, we want margins 3-7
 EDGE_TO_MARGIN = 4.5
 
-# Margin to probability scale
-# margin 0 -> 50%, margin 3 -> ~60%, margin 5 -> ~67%, margin 10 -> ~80%
-MARGIN_PROB_SCALE = 7.0
+# Margin to probability scale (flattened to reduce overconfidence)
+# margin 0 -> 50%, margin 5 -> ~64%, margin 10 -> ~76%
+MARGIN_PROB_SCALE = 8.8
 
-# Probability clamps to prevent overconfidence
+# Probability clamps to prevent overconfidence (tightened)
 PROB_MIN = 0.05
-PROB_MAX = 0.95
+PROB_MAX = 0.93
 
-# Confidence bucket thresholds (configurable)
+# Confidence bucket thresholds (raised to reduce overconfidence)
 # These define the boundaries for HIGH / MEDIUM / LOW confidence labels
-CONF_HIGH_MIN = 65.0   # confidence_pct >= 65.0 -> HIGH
-CONF_MED_MIN = 57.5    # confidence_pct >= 57.5 -> MEDIUM, else LOW
+# HIGH also requires multi-signal confirmation (see GameScore.strong_signal_count)
+CONF_HIGH_MIN = 72.0   # confidence_pct >= 72.0 AND multi-signal -> HIGH
+CONF_MED_MIN = 60.0    # confidence_pct >= 60.0 -> MEDIUM, else LOW
 
 
 # ============================================================================
@@ -186,15 +190,74 @@ class GameScore:
         """Get confidence as percentage string."""
         return f"{self.confidence_pct_value:.1f}%"
     
+    def strong_signal_count(self) -> int:
+        """
+        Count strong independent signals supporting the pick.
+        
+        Excludes lineup_net_rating, home_road_split, and home_court to avoid
+        labeling games HIGH off a single dominant source.
+        Shot Quality and 3P Edge are treated as one combined shooting signal.
+        
+        Returns:
+            Number of strong (signed_value >= 0.35) independent signals
+        """
+        factor_map = {f.name: f for f in self.factors}
+        
+        def is_strong(name: str, thresh: float = 0.35) -> bool:
+            f = factor_map.get(name)
+            return (f is not None) and (f.signed_value >= thresh)
+        
+        count = 0
+        
+        # Efficiency, ball security
+        if is_strong("off_vs_def"):
+            count += 1
+        if is_strong("turnover_diff"):
+            count += 1
+        
+        # Shooting: treat as one signal (avoid double counting)
+        shot_quality_sv = factor_map.get("shot_quality")
+        three_point_sv = factor_map.get("three_point_edge")
+        shooting_strength = max(
+            shot_quality_sv.signed_value if shot_quality_sv else 0.0,
+            three_point_sv.signed_value if three_point_sv else 0.0,
+        )
+        if shooting_strength >= 0.35:
+            count += 1
+        
+        # Defense signals
+        if is_strong("rim_protection"):
+            count += 1
+        if is_strong("perimeter_defense"):
+            count += 1
+        
+        # Rebounding and bench stability
+        if is_strong("rebounding"):
+            count += 1
+        if is_strong("bench_depth"):
+            count += 1
+        
+        return count
+    
     @property
     def confidence_bucket(self) -> str:
         """
         Get confidence bucket label (HIGH / MEDIUM / LOW).
-        Based on configurable thresholds CONF_HIGH_MIN and CONF_MED_MIN.
+        
+        HIGH requires both:
+        1. confidence_pct >= CONF_HIGH_MIN (72%)
+        2. At least 2 strong independent signals (multi-signal confirmation)
+        
+        This prevents HIGH labels driven mostly by net rating + home stacking.
         """
         pct = self.confidence_pct_value
+        
         if pct >= CONF_HIGH_MIN:
-            return "HIGH"
+            # Require multi-signal confirmation for HIGH
+            if self.strong_signal_count() >= 2:
+                return "HIGH"
+            # Downgrade to MEDIUM if insufficient signal confirmation
+            return "MEDIUM"
         elif pct >= CONF_MED_MIN:
             return "MEDIUM"
         else:
@@ -318,6 +381,29 @@ def clamp(value: float, min_val: float = -1.0, max_val: float = 1.0) -> float:
     return max(min_val, min(max_val, value))
 
 
+# Softcap scales (prevents saturation at exactly +/-1.0)
+# These values make typical deltas land around 0.2-0.7, not 1.0
+NET_RATING_SOFTCAP = 12.0
+HOME_ROAD_SOFTCAP = 10.0
+
+
+def softcap_tanh(value: float, scale: float) -> float:
+    """
+    Smoothly compress value to (-1, 1) without hard clipping.
+    Prevents frequent saturation at exactly +/-1.0.
+    
+    Args:
+        value: The raw delta value to compress
+        scale: The scale factor (larger = more gradual compression)
+    
+    Returns:
+        Compressed value in range (-1, 1)
+    """
+    if scale <= 0:
+        return clamp(value)
+    return tanh(value / scale)
+
+
 def safe_get(stats: dict, key: str, default: float = 0.0) -> float:
     """Safely get a numeric value from stats dict."""
     val = stats.get(key, default)
@@ -437,11 +523,14 @@ def calc_lineup_net_rating(
     away_adjusted_net: float,
 ) -> FactorResult:
     """
-    Factor 1: Lineup-Adjusted Net Rating (14 points)
+    Factor 1: Lineup-Adjusted Net Rating
     Uses lineup-adjusted ratings that account for injuries.
+    
+    Uses softcap_tanh to prevent saturation at exactly +/-1.0.
     """
     delta = home_adjusted_net - away_adjusted_net
-    signed_value = clamp(delta / SCALES["net_rating"])
+    # Use softcap instead of hard clamp to prevent saturation
+    signed_value = softcap_tanh(delta, NET_RATING_SOFTCAP)
     
     return FactorResult(
         name="lineup_net_rating",
@@ -758,11 +847,17 @@ def calc_home_road_split(
     away_road_net: float,
 ) -> FactorResult:
     """
-    Factor 9: Home/Road Performance Split (5 points) - NEW in v3
+    Factor 9: Home/Road Performance Split
     Uses actual home/road performance splits.
+    
+    Uses softcap_tanh to prevent saturation, and applies a 0.75 stacking gate
+    to reduce double counting with home_court factor.
     """
     delta = home_home_net - away_road_net
-    signed_value = clamp(delta / SCALES["home_road"])
+    # Use softcap instead of hard clamp to prevent saturation
+    signed_value = softcap_tanh(delta, HOME_ROAD_SOFTCAP)
+    # Apply stacking gate to reduce double counting with home_court
+    signed_value *= 0.75
     
     return FactorResult(
         name="home_road_split",
