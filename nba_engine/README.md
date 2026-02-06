@@ -1,23 +1,34 @@
 # NBA Prediction Engine v3
 
-A fully automated pregame NBA prediction engine with Excel-based tracking and winrate dashboard.
+A fully automated pregame NBA prediction engine with built-in tracking and automated score grading.
 
 > **Built with Claude Opus 4.5** - This project was developed with assistance from Anthropic's Claude Opus 4.5 AI model.
 
 ## Features
 
 - **One-Click GUI Application**: Beautiful graphical interface - just click a button to get predictions
-- **Excel Tracking**: Single persistent workbook tracks all predictions with overwrite-by-day logic
+- **Built-in SQLite Storage**: Persistent local database tracks all predictions without external dependencies
+- **Automated Score Checking**: "Check Scores" button fetches final scores and grades picks automatically
 - **Winrate Dashboard**: See overall and confidence-level win percentages at a glance
-- **21-Factor Scoring System**: Advanced weighted model for accurate predictions
+- **18-Factor Scoring System**: Advanced weighted model for accurate predictions
 - **Automated Data Fetching**: Pulls team stats, player stats, and injury reports automatically
+- **Excel Backup**: Optional Excel export for legacy compatibility
 
 ## How It Works
 
 1. **Run Today's Predictions** - Click the button to generate predictions for today's games
-2. **Excel Logging** - Predictions are saved to `outputs/tracking/NBA_Engine_Tracking.xlsx`
-3. **Manual Result Entry** - Fill in the `actual_winner` column in Excel after games complete
-4. **Winrate Tracking** - Click "Refresh Winrates" to see updated performance stats
+2. **Check Scores** - Click "Check Scores" to fetch final scores and automatically grade picks
+3. **View Stats** - Click "Refresh Stats" to see updated win rate statistics from the database
+4. **Export to CSV** - Optionally export predictions to CSV for external analysis
+
+### Data Storage
+
+Predictions are stored in a persistent SQLite database:
+- **Windows**: `%APPDATA%\NBA_Engine\nba_predictions.db`
+- **macOS**: `~/Library/Application Support/NBA_Engine/nba_predictions.db`
+- **Linux**: `~/.local/share/NBA_Engine/nba_predictions.db`
+
+Excel backup (optional): `%APPDATA%\NBA_Engine\tracking\NBA_Engine_Tracking.xlsx`
 
 ### Overwrite-by-Day Rule
 

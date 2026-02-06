@@ -33,6 +33,24 @@ from paths import (
     log_startup_diagnostics,
     get_tracking_path_message,
     is_frozen,
+    DATA_ROOT,
+)
+
+# Import storage module for SQLite persistence
+from storage import (
+    init_db,
+    insert_run,
+    upsert_game,
+    upsert_pick,
+    compute_stats,
+    get_db_path,
+    generate_game_id,
+)
+
+# Import services for score checking
+from services import (
+    fetch_scores_for_date,
+    grade_picks_for_date,
 )
 
 
@@ -86,8 +104,11 @@ class NBAPredictor(tk.Tk):
         # Create UI
         self.create_widgets()
         
-        # Load initial winrate stats
-        self.refresh_winrates()
+        # Initialize database
+        init_db()
+        
+        # Load initial winrate stats from database
+        self.after(250, self.refresh_stats_from_db)
     
     def setup_styles(self):
         """Configure ttk styles for modern appearance."""
@@ -284,10 +305,18 @@ class NBAPredictor(tk.Tk):
         )
         self.open_excel_button.pack(side=tk.LEFT, padx=5)
         
+        self.check_scores_button = ttk.Button(
+            right_frame,
+            text="📊 Check Scores",
+            command=self.check_scores,
+            style='Secondary.TButton'
+        )
+        self.check_scores_button.pack(side=tk.LEFT, padx=5)
+        
         self.refresh_button = ttk.Button(
             right_frame,
             text="🔄 Refresh Stats",
-            command=self.refresh_winrates,
+            command=self.refresh_stats_from_db,
             style='Secondary.TButton'
         )
         self.refresh_button.pack(side=tk.LEFT, padx=5)
@@ -815,6 +844,148 @@ class NBAPredictor(tk.Tk):
         except Exception as e:
             self.log(f"Error refreshing winrates: {e}")
     
+    def refresh_stats_from_db(self):
+        """Refresh winrate statistics from SQLite database."""
+        try:
+            stats = compute_stats()
+            
+            # Update overall
+            if stats.total_graded > 0:
+                self.overall_winrate_var.set(f"{stats.win_pct:.1f}%")
+                self.overall_record_var.set(f"({stats.wins}-{stats.losses})")
+            else:
+                self.overall_winrate_var.set("--")
+                self.overall_record_var.set("(0-0)")
+            
+            # Update HIGH
+            if stats.high_graded > 0:
+                self.high_winrate_var.set(f"{stats.high_win_pct:.1f}%")
+                self.high_record_var.set(f"({stats.high_wins}-{stats.high_losses})")
+            else:
+                self.high_winrate_var.set("--")
+                self.high_record_var.set("(0-0)")
+            
+            # Update MEDIUM
+            if stats.med_graded > 0:
+                self.med_winrate_var.set(f"{stats.med_win_pct:.1f}%")
+                self.med_record_var.set(f"({stats.med_wins}-{stats.med_losses})")
+            else:
+                self.med_winrate_var.set("--")
+                self.med_record_var.set("(0-0)")
+            
+            # Update LOW
+            if stats.low_graded > 0:
+                self.low_winrate_var.set(f"{stats.low_win_pct:.1f}%")
+                self.low_record_var.set(f"({stats.low_wins}-{stats.low_losses})")
+            else:
+                self.low_winrate_var.set("--")
+                self.low_record_var.set("(0-0)")
+            
+            # Update pending
+            self.pending_var.set(str(stats.pending))
+            
+            self.log(f"Stats refreshed from DB: {stats.wins}/{stats.total_graded} overall, {stats.pending} pending")
+            
+        except Exception as e:
+            self.log(f"Error refreshing stats from DB: {e}")
+            # Fall back to Excel if DB fails
+            self.refresh_winrates()
+    
+    def check_scores(self):
+        """Check scores for today's games and grade picks."""
+        self.check_scores_button.config(state=tk.DISABLED)
+        self.status_var.set("Checking scores...")
+        
+        def _check():
+            try:
+                from datetime import datetime, timezone, timedelta
+                
+                # Get today's date in ET
+                now_utc = datetime.now(timezone.utc)
+                et_offset = timedelta(hours=-5)
+                now_et = now_utc + et_offset
+                today = now_et.strftime("%Y-%m-%d")
+                
+                self.log(f"\nChecking scores for {today}...")
+                
+                # Fetch scores and grade picks
+                games_updated, picks_graded, picks_pending = grade_picks_for_date(today)
+                
+                self.log(f"  Games updated: {games_updated}")
+                self.log(f"  Picks graded: {picks_graded}")
+                self.log(f"  Picks pending: {picks_pending}")
+                
+                # Refresh stats display
+                self.after(0, self.refresh_stats_from_db)
+                self.after(0, lambda: self.status_var.set(f"Scores checked - {picks_graded} graded"))
+                
+            except Exception as e:
+                self.log(f"Error checking scores: {e}")
+                self.after(0, lambda: self.status_var.set(f"Error: {e}"))
+            finally:
+                self.after(0, lambda: self.check_scores_button.config(state=tk.NORMAL))
+        
+        thread = threading.Thread(target=_check, daemon=True)
+        thread.start()
+    
+    def persist_predictions_to_db(self, scores: list, run_date: str) -> int:
+        """
+        Persist predictions to the SQLite database.
+        
+        Args:
+            scores: List of GameScore objects
+            run_date: Date of the run (YYYY-MM-DD)
+        
+        Returns:
+            Number of picks saved
+        """
+        from uuid import uuid4
+        
+        # Create a new run
+        run_id = insert_run(run_date, model_version="v3.2")
+        
+        saved = 0
+        for score in scores:
+            # Determine game_id - use API game_id if available, else generate
+            game_id = getattr(score, 'game_id', None)
+            if not game_id:
+                game_id = generate_game_id(run_date, score.away_team, score.home_team)
+            
+            # Upsert game record
+            upsert_game(
+                game_id=game_id,
+                game_date=run_date,
+                away_team=score.away_team,
+                home_team=score.home_team,
+                status="scheduled",
+            )
+            
+            # Determine pick side
+            pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
+            
+            # Create pick record
+            pick_id = str(uuid4())
+            upsert_pick(
+                pick_id=pick_id,
+                run_id=run_id,
+                game_id=game_id,
+                matchup=f"{score.away_team} @ {score.home_team}",
+                pick_team=score.predicted_winner,
+                pick_side=pick_side,
+                conf_pct=score.confidence_pct_value,
+                bucket=score.confidence_bucket,
+                pred_away_score=score.display_away_points,
+                pred_home_score=score.display_home_points,
+                pred_total=score.predicted_total,
+                range_low=score.total_range_low,
+                range_high=score.total_range_high,
+                internal_edge=score.edge_score_total,
+                internal_margin=score.projected_margin_home,
+            )
+            saved += 1
+        
+        return saved
+    
     def start_prediction_run(self):
         """Start the prediction run in a background thread."""
         self.run_button.config(state=tk.DISABLED)
@@ -1067,30 +1238,34 @@ class NBAPredictor(tk.Tk):
                 )
                 entries.append(entry)
             
+            # Save to SQLite database (primary storage)
+            try:
+                db_saved = self.persist_predictions_to_db(self.scores, run_date)
+                self.log(f"  Saved {db_saved} predictions to database")
+                self.log(f"  DB location: {get_db_path()}")
+            except Exception as e:
+                self.log(f"  Warning: Could not save to DB: {e}")
+            
+            # Also save to Excel (legacy backup)
             try:
                 tracker = ExcelTracker()
                 saved_count = tracker.save_predictions(entries)
-                self.log(f"  Saved {saved_count} predictions (overwrote any previous for today)")
+                self.log(f"  Saved {saved_count} predictions to Excel (backup)")
                 self.log(f"  {get_tracking_path_message()}")
                 
-                # Update summary
+                # Update Excel summary
                 stats = tracker.refresh_winrates()
-                self.log(f"  Updated summary sheet")
+                self.log(f"  Updated Excel summary sheet")
                 
             except IOError as e:
-                self.log(f"  ERROR: {e}")
-                self.after(0, lambda: messagebox.showerror(
-                    "File Error",
-                    "Please close NBA_Engine_Tracking.xlsx and try again."
-                ))
-                self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
-                return
+                self.log(f"  Excel backup skipped: {e}")
+                # Don't fail the whole operation if Excel is locked
             
             # Update UI
             self.after(0, self.update_predictions_display)
             self.after(0, self.update_injuries_display)
             self.after(0, self.update_game_selector)
-            self.after(0, self.refresh_winrates)
+            self.after(0, self.refresh_stats_from_db)
             
             self.after(0, lambda: self.status_var.set(f"Predictions updated for {run_date}"))
             self.log(f"\n✓ Complete! Predictions saved for {run_date}")
