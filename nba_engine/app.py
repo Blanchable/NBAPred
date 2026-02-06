@@ -112,6 +112,11 @@ class NBAPredictor(tk.Tk):
         self.injury_rows_cache = []  # parsed InjuryRow list
         self.roster_loading = False
         
+        # Projections tab caches
+        self.team_stats_cache = None  # dict[team] -> TeamStrength
+        self.projections_loading = False
+        self.proj_last_updated = None
+        
         # Configure styles
         self.setup_styles()
         
@@ -568,6 +573,11 @@ class NBAPredictor(tk.Tk):
         self.roster_frame = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.roster_frame, text="  🏀 Roster  ")
         self.create_roster_view()
+        
+        # Projections tab
+        self.projections_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.projections_frame, text="  📈 Projections  ")
+        self.create_projections_view()
         
         # Log tab
         self.log_frame = ttk.Frame(self.notebook, style='TFrame')
@@ -1286,6 +1296,491 @@ class NBAPredictor(tk.Tk):
         self.roster_tonight_var.set("Error loading roster")
         self.roster_refresh_btn.config(state=tk.NORMAL)
         self.roster_loading = False
+        self.log(f"  {error_msg}")
+    
+    # =========================================================================
+    # PROJECTIONS TAB
+    # =========================================================================
+    
+    def create_projections_view(self):
+        """Create the projections tab with controls and player table."""
+        from services.projections import ProjectionMode
+        
+        # Container
+        container = tk.Frame(self.projections_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Top controls bar
+        controls_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        controls_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        # Date label (today)
+        tk.Label(
+            controls_frame,
+            text="Date:",
+            font=('Segoe UI', 10),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.proj_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        self.proj_date_entry = ttk.Entry(
+            controls_frame,
+            textvariable=self.proj_date_var,
+            width=12,
+            font=('Segoe UI', 10)
+        )
+        self.proj_date_entry.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # View dropdown
+        tk.Label(
+            controls_frame,
+            text="View:",
+            font=('Segoe UI', 10),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.proj_view_var = tk.StringVar(value="Slate")
+        self.proj_view_combo = ttk.Combobox(
+            controls_frame,
+            textvariable=self.proj_view_var,
+            state='readonly',
+            width=8,
+            values=["Slate", "Game"],
+            font=('Segoe UI', 10)
+        )
+        self.proj_view_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.proj_view_combo.bind('<<ComboboxSelected>>', self._on_proj_view_changed)
+        
+        # Game dropdown (only active in Game view)
+        tk.Label(
+            controls_frame,
+            text="Game:",
+            font=('Segoe UI', 10),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.proj_game_var = tk.StringVar()
+        self.proj_game_combo = ttk.Combobox(
+            controls_frame,
+            textvariable=self.proj_game_var,
+            state='disabled',
+            width=20,
+            font=('Segoe UI', 10)
+        )
+        self.proj_game_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Second row for mode and buttons
+        controls_frame2 = tk.Frame(container, bg=COLORS['card_bg'])
+        controls_frame2.pack(fill=tk.X, padx=10, pady=(0, 5))
+        
+        # Mode dropdown
+        tk.Label(
+            controls_frame2,
+            text="Mode:",
+            font=('Segoe UI', 10),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.proj_mode_var = tk.StringVar(value=ProjectionMode.BASELINE_PACE)
+        self.proj_mode_combo = ttk.Combobox(
+            controls_frame2,
+            textvariable=self.proj_mode_var,
+            state='readonly',
+            width=22,
+            values=[
+                ProjectionMode.BASELINE,
+                ProjectionMode.BASELINE_PACE,
+                ProjectionMode.BASELINE_PACE_DEF,
+            ],
+            font=('Segoe UI', 10)
+        )
+        self.proj_mode_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Minutes dropdown
+        tk.Label(
+            controls_frame2,
+            text="Minutes:",
+            font=('Segoe UI', 10),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.proj_min_var = tk.StringVar(value="Season MPG")
+        self.proj_min_combo = ttk.Combobox(
+            controls_frame2,
+            textvariable=self.proj_min_var,
+            state='readonly',
+            width=12,
+            values=["Season MPG"],
+            font=('Segoe UI', 10)
+        )
+        self.proj_min_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Refresh button
+        self.proj_refresh_btn = ttk.Button(
+            controls_frame2,
+            text="🔄 Refresh",
+            command=self.refresh_projections,
+            style='Secondary.TButton'
+        )
+        self.proj_refresh_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Check Injuries button
+        self.proj_injuries_btn = ttk.Button(
+            controls_frame2,
+            text="🏥 Check Injuries",
+            command=self._refresh_injuries_then_projections,
+            style='Secondary.TButton'
+        )
+        self.proj_injuries_btn.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Last updated label
+        self.proj_updated_var = tk.StringVar(value="Not loaded")
+        tk.Label(
+            controls_frame2,
+            textvariable=self.proj_updated_var,
+            font=('Segoe UI', 9, 'italic'),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text_muted']
+        ).pack(side=tk.LEFT)
+        
+        # Projections treeview
+        tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        columns = (
+            'player', 'team', 'status', 'tonight',
+            'proj_min', 'proj_pts', 'proj_reb', 'proj_ast', 'proj_3pm', 'uncertainty'
+        )
+        
+        self.proj_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show='headings',
+            selectmode='browse'
+        )
+        
+        # Configure columns
+        col_configs = [
+            ('player', 'Player', 150, 'w'),
+            ('team', 'Team', 50, 'center'),
+            ('status', 'Status', 85, 'center'),
+            ('tonight', 'Tonight', 60, 'center'),
+            ('proj_min', 'ProjMin', 65, 'center'),
+            ('proj_pts', 'ProjPTS', 65, 'center'),
+            ('proj_reb', 'ProjREB', 65, 'center'),
+            ('proj_ast', 'ProjAST', 65, 'center'),
+            ('proj_3pm', 'Proj3PM', 65, 'center'),
+            ('uncertainty', 'Uncertainty', 80, 'center'),
+        ]
+        
+        for col_id, heading, width, anchor in col_configs:
+            self.proj_tree.heading(col_id, text=heading, command=lambda c=col_id: self._sort_proj_tree(c))
+            self.proj_tree.column(col_id, width=width, anchor=anchor)
+        
+        # Scrollbar
+        proj_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.proj_tree.yview)
+        self.proj_tree.configure(yscrollcommand=proj_scroll.set)
+        
+        self.proj_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        proj_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure row tags
+        self.proj_tree.tag_configure('out', foreground=COLORS['danger'])
+        self.proj_tree.tag_configure('doubtful', foreground='#a55a00')
+        self.proj_tree.tag_configure('questionable', foreground=COLORS['warning'])
+        self.proj_tree.tag_configure('star', foreground=COLORS['primary'], font=('Segoe UI', 9, 'bold'))
+        
+        # Player detail panel
+        detail_frame = tk.Frame(container, bg=COLORS['bg'], height=80)
+        detail_frame.pack(fill=tk.X, padx=10, pady=5)
+        detail_frame.pack_propagate(False)
+        
+        self.proj_detail_var = tk.StringVar(value="Select a player to see projection details")
+        tk.Label(
+            detail_frame,
+            textvariable=self.proj_detail_var,
+            font=('Segoe UI', 10),
+            bg=COLORS['bg'],
+            fg=COLORS['text'],
+            justify=tk.LEFT,
+            anchor='w'
+        ).pack(fill=tk.X, padx=10, pady=10)
+        
+        # Bind selection
+        self.proj_tree.bind('<<TreeviewSelect>>', self._on_proj_player_selected)
+        
+        # Store game mapping
+        self.proj_game_map = {}  # display string -> game object
+        self.proj_sort_reverse = {}  # column -> bool for sort direction
+        self._proj_full_data = []  # Full projection data for reference
+    
+    def _on_proj_view_changed(self, event=None):
+        """Handle view change between Slate and Game."""
+        view = self.proj_view_var.get()
+        if view == "Game":
+            self.proj_game_combo.config(state='readonly')
+        else:
+            self.proj_game_combo.config(state='disabled')
+    
+    def _sort_proj_tree(self, col):
+        """Sort projections treeview by column."""
+        # Get all items
+        items = [(self.proj_tree.set(item, col), item) for item in self.proj_tree.get_children('')]
+        
+        # Determine sort direction
+        reverse = self.proj_sort_reverse.get(col, False)
+        self.proj_sort_reverse[col] = not reverse
+        
+        # Try numeric sort for numeric columns
+        numeric_cols = ('proj_min', 'proj_pts', 'proj_reb', 'proj_ast', 'proj_3pm')
+        if col in numeric_cols:
+            try:
+                items.sort(key=lambda x: float(x[0]) if x[0] else 0, reverse=reverse)
+            except ValueError:
+                items.sort(key=lambda x: x[0], reverse=reverse)
+        else:
+            items.sort(key=lambda x: x[0], reverse=reverse)
+        
+        # Rearrange items
+        for index, (_, item) in enumerate(items):
+            self.proj_tree.move(item, '', index)
+    
+    def _on_proj_player_selected(self, event=None):
+        """Handle player selection in projections tree."""
+        selection = self.proj_tree.selection()
+        if not selection:
+            return
+        
+        item = self.proj_tree.item(selection[0])
+        values = item['values']
+        
+        if values:
+            player = values[0]
+            team = values[1]
+            status = values[2]
+            tonight = values[3]
+            proj_min = values[4]
+            proj_pts = values[5]
+            proj_reb = values[6]
+            proj_ast = values[7]
+            proj_3pm = values[8]
+            uncertainty = values[9]
+            
+            detail = f"{player} ({team}) - Status: {status}, Tonight: {tonight}\n"
+            detail += f"Projections: {proj_min} MIN, {proj_pts} PTS, {proj_reb} REB, {proj_ast} AST, {proj_3pm} 3PM\n"
+            detail += f"Uncertainty: {uncertainty}"
+            
+            self.proj_detail_var.set(detail)
+    
+    def _refresh_injuries_then_projections(self):
+        """Refresh injuries cache then projections."""
+        self.injury_rows_cache = []  # Clear cache to force refresh
+        self.refresh_projections()
+    
+    def refresh_projections(self):
+        """Refresh projections for the current view."""
+        if self.projections_loading:
+            return
+        
+        self.projections_loading = True
+        self.proj_refresh_btn.config(state=tk.DISABLED)
+        self.proj_injuries_btn.config(state=tk.DISABLED)
+        self.proj_updated_var.set("Loading...")
+        self.log("Loading projections...")
+        
+        def _fetch_projections():
+            try:
+                from ingest.schedule import get_todays_games, get_current_season
+                from ingest.roster import get_team_roster
+                from ingest.player_stats import get_player_stats
+                from ingest.team_stats import get_comprehensive_team_stats
+                from ingest.injuries import find_latest_injury_pdf, download_injury_pdf, parse_injury_pdf
+                from ingest.availability import normalize_player_name
+                from services.projections import project_slate, project_game
+                
+                season = get_current_season()
+                view = self.proj_view_var.get()
+                mode = self.proj_mode_var.get()
+                
+                # Fetch today's games
+                games, _, _ = get_todays_games()
+                self.todays_games_cache = games
+                
+                if not games:
+                    self.after(0, lambda: self._proj_load_error("No games scheduled for today"))
+                    return
+                
+                # Update game dropdown
+                game_displays = []
+                self.proj_game_map = {}
+                for game in games:
+                    display = f"{game.away_team} @ {game.home_team}"
+                    game_displays.append(display)
+                    self.proj_game_map[display] = game
+                
+                self.after(0, lambda: self._update_proj_game_dropdown(game_displays))
+                
+                # Ensure player stats cache exists
+                if self.player_stats_cache is None:
+                    self.player_stats_cache = get_player_stats(season=season)
+                
+                # Ensure team stats cache exists
+                if self.team_stats_cache is None:
+                    self.team_stats_cache = get_comprehensive_team_stats(season=season)
+                
+                # Fetch injury report if needed
+                if not self.injury_rows_cache:
+                    try:
+                        pdf_path = find_latest_injury_pdf()
+                        if not pdf_path:
+                            pdf_path = download_injury_pdf()
+                        if pdf_path:
+                            self.injury_rows_cache = parse_injury_pdf(pdf_path)
+                    except Exception as e:
+                        print(f"  Could not load injury report: {e}")
+                
+                # Build injury map by team
+                injuries_by_team = {}
+                for row in self.injury_rows_cache:
+                    if row.team not in injuries_by_team:
+                        injuries_by_team[row.team] = {}
+                    name_norm = normalize_player_name(row.player)
+                    status = row.get_canonical_status() if hasattr(row, 'get_canonical_status') else row.status
+                    injuries_by_team[row.team][name_norm] = status
+                
+                # Determine which teams we need rosters for
+                if view == "Game":
+                    game_display = self.proj_game_var.get()
+                    if game_display and game_display in self.proj_game_map:
+                        selected_game = self.proj_game_map[game_display]
+                        teams_needed = [selected_game.home_team, selected_game.away_team]
+                        target_games = [selected_game]
+                    else:
+                        # No game selected, use first game
+                        teams_needed = [games[0].home_team, games[0].away_team]
+                        target_games = [games[0]]
+                else:
+                    # Slate view - all teams
+                    teams_needed = set()
+                    for game in games:
+                        teams_needed.add(game.home_team)
+                        teams_needed.add(game.away_team)
+                    teams_needed = list(teams_needed)
+                    target_games = games
+                
+                # Fetch rosters for needed teams
+                rosters_by_team = {}
+                for team in teams_needed:
+                    if team not in self.roster_cache:
+                        roster = get_team_roster(team, season=season)
+                        self.roster_cache[team] = roster
+                    rosters_by_team[team] = self.roster_cache[team]
+                
+                # Run projections
+                if view == "Game" and len(target_games) == 1:
+                    game = target_games[0]
+                    result = project_game(
+                        game=game,
+                        roster_home=rosters_by_team.get(game.home_team, []),
+                        roster_away=rosters_by_team.get(game.away_team, []),
+                        player_stats_by_team=self.player_stats_cache,
+                        injuries_by_team=injuries_by_team,
+                        team_stats=self.team_stats_cache,
+                        mode=mode,
+                    )
+                    projections = result['combined']
+                else:
+                    projections = project_slate(
+                        games=target_games,
+                        rosters_by_team=rosters_by_team,
+                        player_stats_by_team=self.player_stats_cache,
+                        injuries_by_team=injuries_by_team,
+                        team_stats=self.team_stats_cache,
+                        mode=mode,
+                        top_n=100,
+                    )
+                
+                # Update UI from main thread
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.after(0, lambda: self._render_projections(projections, timestamp))
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error loading projections: {e}"
+                print(error_msg)
+                traceback.print_exc()
+                self.after(0, lambda: self._proj_load_error(error_msg))
+        
+        # Run in background thread
+        thread = threading.Thread(target=_fetch_projections, daemon=True)
+        thread.start()
+    
+    def _update_proj_game_dropdown(self, game_displays: list):
+        """Update the game dropdown with available games."""
+        self.proj_game_combo['values'] = game_displays
+        if game_displays and not self.proj_game_var.get():
+            self.proj_game_var.set(game_displays[0])
+    
+    def _render_projections(self, projections: list, timestamp: str):
+        """Render projection rows in the treeview."""
+        # Clear tree
+        for item in self.proj_tree.get_children():
+            self.proj_tree.delete(item)
+        
+        # Store full data
+        self._proj_full_data = projections
+        
+        # Insert rows
+        for proj in projections:
+            # Determine tags
+            tags = []
+            status_upper = proj.status.upper()
+            if status_upper == "OUT":
+                tags.append('out')
+            elif status_upper == "DOUBTFUL":
+                tags.append('doubtful')
+            elif status_upper == "QUESTIONABLE":
+                tags.append('questionable')
+            
+            # Highlight high scorers
+            if proj.proj_pts >= 20:
+                tags.append('star')
+            
+            values = (
+                proj.player_name,
+                proj.team_abbrev,
+                proj.status,
+                proj.tonight,
+                proj.proj_min,
+                proj.proj_pts,
+                proj.proj_reb,
+                proj.proj_ast,
+                proj.proj_3pm,
+                proj.uncertainty,
+            )
+            self.proj_tree.insert('', tk.END, values=values, tags=tuple(tags))
+        
+        # Update timestamp
+        self.proj_updated_var.set(f"Updated: {timestamp}")
+        
+        # Re-enable buttons
+        self.proj_refresh_btn.config(state=tk.NORMAL)
+        self.proj_injuries_btn.config(state=tk.NORMAL)
+        self.projections_loading = False
+        
+        self.log(f"  Loaded {len(projections)} player projections")
+    
+    def _proj_load_error(self, error_msg: str):
+        """Handle projection load error."""
+        self.proj_updated_var.set("Error loading")
+        self.proj_refresh_btn.config(state=tk.NORMAL)
+        self.proj_injuries_btn.config(state=tk.NORMAL)
+        self.projections_loading = False
         self.log(f"  {error_msg}")
     
     def log(self, message: str):

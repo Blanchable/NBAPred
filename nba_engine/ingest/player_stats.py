@@ -26,7 +26,7 @@ TEAM_ID_TO_ABBREV = {team['id']: team['abbreviation'] for team in nba_teams.get_
 
 @dataclass
 class PlayerImpact:
-    """Player impact data for lineup adjustment and roster display."""
+    """Player impact data for lineup adjustment, roster display, and projections."""
     player_name: str
     team: str
     minutes_per_game: float
@@ -36,11 +36,13 @@ class PlayerImpact:
     is_key_player: bool  # Top 6 by impact on team
     impact_rank: int = 0  # 1 = top player, 2 = second, etc.
     is_star: bool = False  # Top 2 player on team
-    # Additional stats for roster display
+    # Additional stats for roster display and projections
     rebounds_per_game: float = 0.0
     assists_per_game: float = 0.0
     fg_pct: float = 0.0
     fg3_pct: float = 0.0
+    threes_made_per_game: float = 0.0  # FG3M per game for projections
+    player_id: int = 0  # NBA player ID
     
     @property
     def player_name_normalized(self) -> str:
@@ -91,6 +93,12 @@ def get_player_stats(
                 fg_pct = float(row.get("FG_PCT", 0) or 0) * 100  # Convert to percentage
                 fg3_pct = float(row.get("FG3_PCT", 0) or 0) * 100  # Convert to percentage
                 
+                # Extract 3-pointers made per game (FG3M)
+                fg3m = float(row.get("FG3M", 0) or 0)
+                
+                # Get player ID
+                player_id = int(row.get("PLAYER_ID", 0) or 0)
+                
                 # Calculate points per minute
                 ppm = ppg / mpg if mpg > 0 else 0
                 
@@ -110,6 +118,8 @@ def get_player_stats(
                     assists_per_game=apg,
                     fg_pct=fg_pct,
                     fg3_pct=fg3_pct,
+                    threes_made_per_game=fg3m,
+                    player_id=player_id,
                 )
                 
                 if team_abbrev not in team_players:
@@ -170,6 +180,8 @@ def get_fallback_player_stats() -> dict[str, list[PlayerImpact]]:
                 assists_per_game=5 - i * 0.5,
                 fg_pct=48.0 - i,
                 fg3_pct=36.0 - i,
+                threes_made_per_game=2.5 - i * 0.3,
+                player_id=1000 + i,
             ))
         team_players[team] = players
     
