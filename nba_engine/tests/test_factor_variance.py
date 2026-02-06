@@ -12,8 +12,8 @@ import copy
 
 from model.point_system import (
     score_game_v3, safe_get, safe_get_with_fallback,
-    calc_shot_quality, calc_turnover_diff, calc_rebounding,
-    calc_pace_control, calc_three_point_edge,
+    calc_shooting_advantage, calc_turnover_diff, calc_rebounding,
+    calc_pace_control,
 )
 from model.factor_debug import (
     validate_distinct_stats, ensure_distinct_copies,
@@ -127,19 +127,21 @@ class TestDistinctStatsValidation:
 class TestFactorCalculations:
     """Test that factor calculations work correctly with different inputs."""
     
-    def test_shot_quality_different_inputs(self):
-        """Shot quality should differ for different eFG values."""
-        result1 = calc_shot_quality(0.55, 0.50)  # Home better
-        result2 = calc_shot_quality(0.50, 0.55)  # Away better
+    def test_shooting_advantage_different_inputs(self):
+        """Shooting advantage should differ for different eFG/3P values."""
+        # Home better at shooting
+        result1 = calc_shooting_advantage(0.55, 0.50, 0.38, 0.35)
+        # Away better at shooting  
+        result2 = calc_shooting_advantage(0.50, 0.55, 0.35, 0.38)
         
         assert result1.signed_value > 0, "Home better should be positive"
         assert result2.signed_value < 0, "Away better should be negative"
-        assert result1.home_raw == 0.55
+        assert result1.home_raw == 0.55  # eFG is stored as home_raw
         assert result1.away_raw == 0.50
     
-    def test_shot_quality_fallback_tracking(self):
-        """Shot quality should track fallback usage."""
-        result = calc_shot_quality(0.55, 0.50, home_fallback=True, away_fallback=False)
+    def test_shooting_advantage_fallback_tracking(self):
+        """Shooting advantage should track fallback usage."""
+        result = calc_shooting_advantage(0.55, 0.50, 0.38, 0.35, home_fallback=True, away_fallback=False)
         
         assert result.home_fallback is True
         assert result.away_fallback is False

@@ -147,31 +147,28 @@ nba_engine/
 └── README.md
 ```
 
-## The 21 Factors
+## The 18 Factors
 
 | # | Factor | Weight | Description |
 |---|--------|--------|-------------|
-| 1 | Net Rating | 11 | Overall team strength (lineup-adjusted, softcapped) |
-| 2 | Star Impact | 10 | Tiered star availability |
-| 3 | Off vs Def Efficiency | 10 | Matchup-specific scoring |
-| 4 | Turnover Differential | 6 | Ball security |
-| 5 | Rotation Replacement | 5 | Next-man-up quality |
-| 6 | Shot Quality | 5 | Effective FG% |
-| 7 | 3P Edge | 5 | Three-point shooting |
-| 8 | Free Throw Rate | 5 | Getting to the line |
-| 9 | Rebounding | 5 | Board control (possession) |
-| 10 | Rest/Fatigue | 5 | Days since last game |
-| 11 | Rim Protection | 5 | Interior defense |
-| 12 | Perimeter Defense | 5 | Opponent 3P% allowed |
-| 13 | Bench Depth | 5 | Rotation quality |
-| 14 | Matchup Fit | 4 | Style compatibility |
-| 15 | Home/Road Split | 3 | Home vs away performance (softcapped) |
-| 16 | Home Court | 3 | Fixed home advantage |
-| 17 | Pace Control | 3 | Tempo advantage |
-| 18 | Late Game Creation | 3 | Clutch performance |
-| 19 | Shooting Variance | 2 | 3P reliance (variance) |
-| 20 | Coaching | 0 | Neutral (no data) |
-| 21 | Motivation | 0 | Neutral (no data) |
+| 1 | Lineup Net Rating | 18 | Overall team strength (lineup-adjusted, softcapped) |
+| 2 | Off vs Def Efficiency | 12 | Matchup-specific scoring |
+| 3 | Shooting Advantage | 8 | Combined eFG% + 3P% (merged Shot Quality + 3P Edge) |
+| 4 | Star Impact | 7 | Tiered star availability |
+| 5 | Turnover Differential | 6 | Ball security |
+| 6 | Rebounding | 6 | Board control (possession) |
+| 7 | Rotation Replacement | 5 | Next-man-up quality |
+| 8 | Rest/Fatigue | 5 | Days since last game |
+| 9 | Variance Signal | 5 | 3P reliance (affects confidence) |
+| 10 | Free Throw Differential | 4 | FT rate difference |
+| 11 | Home Court | 4 | Fixed home advantage |
+| 12 | Matchup Fit | 4 | Style compatibility |
+| 13 | Home/Road Split | 3 | Home vs away performance (softcapped) |
+| 14 | Rim Protection | 3 | Interior defense |
+| 15 | Bench Depth | 3 | Rotation quality |
+| 16 | Late Game Creation | 3 | Clutch performance |
+| 17 | Perimeter Defense | 2 | Opponent 3P% allowed |
+| 18 | Pace Control | 2 | Tempo advantage |
 
 ### Confidence Buckets
 

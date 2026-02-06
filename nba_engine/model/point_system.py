@@ -34,31 +34,30 @@ from .totals_prediction import predict_game_totals, TotalsPrediction
 # ============================================================================
 
 # Factor weights (must sum to 100)
-# V3.1: Rebalanced to reduce overconfidence and double counting
-# - Reduced net rating dominance
-# - Reduced home stacking (home_court + home_road_split)
-# - Increased defense and injury awareness
+# V3.2: Simplified to reduce double counting and improve interpretability
+# - Merged shot_quality + three_point_edge into shooting_advantage
+# - Replaced free_throw_rate with free_throw_differential
+# - Reduced defense and bench weights to avoid overlap with net rating
 FACTOR_WEIGHTS = {
-    "lineup_net_rating": 11,     # Reduced from 14 to prevent saturation dominance
-    "star_impact": 10,           # Slightly higher for injury awareness
-    "rotation_replacement": 5,   # Injury-driven next-man-up quality
-    "off_vs_def": 10,            # Matchup efficiency is important
+    "lineup_net_rating": 18,     # Primary team strength signal (softcapped)
+    "star_impact": 7,            # Injury awareness
+    "rotation_replacement": 5,   # Next-man-up quality
+    "off_vs_def": 12,            # Matchup efficiency
     "turnover_diff": 6,          # Ball security
-    "shot_quality": 5,           # Reduced to avoid overlap with 3P edge
-    "three_point_edge": 5,       # Reduced to avoid overlap with shot quality
-    "free_throw_rate": 5,        # Getting to the line
-    "rebounding": 5,             # Board control
-    "home_road_split": 3,        # Reduced to avoid stacking with home_court
-    "home_court": 3,             # Reduced slightly, keep basic home edge
+    "shooting_advantage": 8,     # Combined eFG + 3P (replaces shot_quality + three_point_edge)
+    "free_throw_diff": 4,        # FT rate differential (replaces free_throw_rate)
+    "rebounding": 6,             # Board control
+    "home_road_split": 3,        # Home/road performance split
+    "home_court": 4,             # Basic home advantage
     "rest_fatigue": 5,           # Rest days
-    "rim_protection": 5,         # Interior defense (increased importance)
-    "perimeter_defense": 5,      # Perimeter D (increased importance)
-    "matchup_fit": 4,            # Style matchups matter
-    "bench_depth": 5,            # Slightly higher, stabilizes outcomes
-    "pace_control": 3,           # Tempo
+    "rim_protection": 3,         # Interior defense (reduced to avoid overlap)
+    "perimeter_defense": 2,      # Perimeter D (reduced to avoid overlap)
+    "matchup_fit": 4,            # Style matchups
+    "bench_depth": 3,            # Rotation quality (reduced to avoid net rating overlap)
+    "pace_control": 2,           # Tempo advantage
     "late_game_creation": 3,     # Clutch proxy
+    "variance_signal": 5,        # 3P reliance (affects confidence)
     "coaching": 0,               # Neutral (no data)
-    "shooting_variance": 2,      # 3P reliance (affects confidence)
     "motivation": 0,             # Neutral (no data)
 }
 
@@ -73,9 +72,8 @@ FACTOR_NAMES = {
     "rotation_replacement": "Rotation Replacement",
     "off_vs_def": "Off vs Def Efficiency",
     "turnover_diff": "Turnover Differential",
-    "shot_quality": "Shot Quality",
-    "three_point_edge": "3P Edge",
-    "free_throw_rate": "Free Throw Rate",
+    "shooting_advantage": "Shooting Advantage",
+    "free_throw_diff": "Free Throw Differential",
     "rebounding": "Rebounding",
     "home_road_split": "Home/Road Split",
     "home_court": "Home Court",
@@ -86,8 +84,8 @@ FACTOR_NAMES = {
     "bench_depth": "Bench Depth",
     "pace_control": "Pace Control",
     "late_game_creation": "Late Game Creation",
+    "variance_signal": "Variance Signal",
     "coaching": "Coaching",
-    "shooting_variance": "Shooting Variance",
     "motivation": "Motivation",
 }
 
@@ -96,9 +94,8 @@ SCALES = {
     "net_rating": 10.0,
     "off_vs_def": 10.0,
     "turnover": 4.0,
-    "shot_quality": 6.0,
-    "three_point": 6.0,
-    "ft_rate": 0.08,
+    "shooting": 0.06,       # Combined eFG + 3P scale (6% diff ~= max)
+    "ftr": 0.12,            # FT rate differential scale
     "rebounding": 6.0,
     "home_road": 8.0,
     "pace": 6.0,
@@ -196,7 +193,6 @@ class GameScore:
         
         Excludes lineup_net_rating, home_road_split, and home_court to avoid
         labeling games HIGH off a single dominant source.
-        Shot Quality and 3P Edge are treated as one combined shooting signal.
         
         Returns:
             Number of strong (signed_value >= 0.35) independent signals
@@ -215,14 +211,8 @@ class GameScore:
         if is_strong("turnover_diff"):
             count += 1
         
-        # Shooting: treat as one signal (avoid double counting)
-        shot_quality_sv = factor_map.get("shot_quality")
-        three_point_sv = factor_map.get("three_point_edge")
-        shooting_strength = max(
-            shot_quality_sv.signed_value if shot_quality_sv else 0.0,
-            three_point_sv.signed_value if three_point_sv else 0.0,
-        )
-        if shooting_strength >= 0.35:
+        # Shooting advantage (combined signal)
+        if is_strong("shooting_advantage"):
             count += 1
         
         # Defense signals
@@ -713,31 +703,42 @@ def calc_turnover_diff(
     )
 
 
-def calc_shot_quality(
+def calc_shooting_advantage(
     home_efg: float,
     away_efg: float,
+    home_fg3_pct: float,
+    away_fg3_pct: float,
     home_fallback: bool = False,
     away_fallback: bool = False,
 ) -> FactorResult:
-    """Factor 5: Shot Quality (7 points)"""
-    delta = (home_efg - away_efg) * 100
-    signed_value = clamp(delta / SCALES["shot_quality"])
+    """
+    Factor: Shooting Advantage (combined eFG + 3P)
     
-    # Build inputs string with fallback indicators
-    home_str = f"HomeEFG:{home_efg:.1%}"
-    away_str = f"AwayEFG:{away_efg:.1%}"
+    Merges shot_quality and three_point_edge to reduce double counting.
+    Weights eFG more heavily (0.7) as it's the more comprehensive measure.
+    """
+    efg_delta = home_efg - away_efg
+    three_delta = home_fg3_pct - away_fg3_pct
+    
+    # Combined shooting advantage (70% eFG, 30% 3P)
+    combined = (0.7 * efg_delta) + (0.3 * three_delta)
+    signed_value = clamp(combined / SCALES["shooting"])
+    
+    # Build inputs string
+    home_str = f"HomeEFG:{home_efg:.1%} 3P:{home_fg3_pct:.1%}"
+    away_str = f"AwayEFG:{away_efg:.1%} 3P:{away_fg3_pct:.1%}"
     if home_fallback:
         home_str += " [FB]"
     if away_fallback:
         away_str += " [FB]"
     
     return FactorResult(
-        name="shot_quality",
-        display_name=FACTOR_NAMES["shot_quality"],
-        weight=FACTOR_WEIGHTS["shot_quality"],
+        name="shooting_advantage",
+        display_name=FACTOR_NAMES["shooting_advantage"],
+        weight=FACTOR_WEIGHTS["shooting_advantage"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["shot_quality"] * signed_value,
-        inputs_used=f"{home_str} {away_str}",
+        contribution=FACTOR_WEIGHTS["shooting_advantage"] * signed_value,
+        inputs_used=f"{home_str} | {away_str}",
         home_raw=home_efg,
         away_raw=away_efg,
         home_fallback=home_fallback,
@@ -745,50 +746,20 @@ def calc_shot_quality(
     )
 
 
-def calc_three_point_edge(
-    home_fg3_pct: float,
-    home_fg3a_rate: float,
-    away_fg3_pct: float,
-    away_fg3a_rate: float,
-    home_fallback: bool = False,
-    away_fallback: bool = False,
-) -> FactorResult:
-    """Factor 6: 3P Volume and Accuracy (7 points)"""
-    home_score = home_fg3_pct * 100 + home_fg3a_rate * 20
-    away_score = away_fg3_pct * 100 + away_fg3a_rate * 20
-    delta = home_score - away_score
-    signed_value = clamp(delta / SCALES["three_point"])
-    
-    home_str = f"Home3P%:{home_fg3_pct:.1%}"
-    away_str = f"Away3P%:{away_fg3_pct:.1%}"
-    if home_fallback:
-        home_str += " [FB]"
-    if away_fallback:
-        away_str += " [FB]"
-    
-    return FactorResult(
-        name="three_point_edge",
-        display_name=FACTOR_NAMES["three_point_edge"],
-        weight=FACTOR_WEIGHTS["three_point_edge"],
-        signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["three_point_edge"] * signed_value,
-        inputs_used=f"{home_str} {away_str}",
-        home_raw=home_fg3_pct,
-        away_raw=away_fg3_pct,
-        home_fallback=home_fallback,
-        away_fallback=away_fallback,
-    )
-
-
-def calc_free_throw_rate(
+def calc_free_throw_diff(
     home_ft_rate: float,
     away_ft_rate: float,
     home_fallback: bool = False,
     away_fallback: bool = False,
 ) -> FactorResult:
-    """Factor 7: Free Throw Rate (6 points)"""
+    """
+    Factor: Free Throw Differential
+    
+    Uses FT rate (FTA/FGA) differential between teams.
+    Positive = home team gets to the line more often.
+    """
     delta = home_ft_rate - away_ft_rate
-    signed_value = clamp(delta / SCALES["ft_rate"])
+    signed_value = clamp(delta / SCALES["ftr"])
     
     home_str = f"HomeFTr:{home_ft_rate:.3f}"
     away_str = f"AwayFTr:{away_ft_rate:.3f}"
@@ -798,11 +769,11 @@ def calc_free_throw_rate(
         away_str += " [FB]"
     
     return FactorResult(
-        name="free_throw_rate",
-        display_name=FACTOR_NAMES["free_throw_rate"],
-        weight=FACTOR_WEIGHTS["free_throw_rate"],
+        name="free_throw_diff",
+        display_name=FACTOR_NAMES["free_throw_diff"],
+        weight=FACTOR_WEIGHTS["free_throw_diff"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["free_throw_rate"] * signed_value,
+        contribution=FACTOR_WEIGHTS["free_throw_diff"] * signed_value,
         inputs_used=f"{home_str} {away_str}",
         home_raw=home_ft_rate,
         away_raw=away_ft_rate,
@@ -1049,20 +1020,24 @@ def calc_coaching() -> FactorResult:
     )
 
 
-def calc_shooting_variance(
+def calc_variance_signal(
     home_fg3a_rate: float,
     away_fg3a_rate: float,
 ) -> FactorResult:
-    """Factor 19: Shooting Variance (2 points)"""
+    """
+    Factor: Variance Signal
+    
+    Measures 3P reliance differential. Less 3P reliance = more stable outcomes.
+    """
     delta = away_fg3a_rate - home_fg3a_rate  # Less 3P reliance = more stable
     signed_value = clamp(delta / 0.10)
     
     return FactorResult(
-        name="shooting_variance",
-        display_name=FACTOR_NAMES["shooting_variance"],
-        weight=FACTOR_WEIGHTS["shooting_variance"],
+        name="variance_signal",
+        display_name=FACTOR_NAMES["variance_signal"],
+        weight=FACTOR_WEIGHTS["variance_signal"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["shooting_variance"] * signed_value,
+        contribution=FACTOR_WEIGHTS["variance_signal"] * signed_value,
         inputs_used=f"Home3PAr:{home_fg3a_rate:.1%} Away3PAr:{away_fg3a_rate:.1%}",
     )
 
@@ -1223,12 +1198,12 @@ def score_game_v3(
         ))
     factors.append(calc_off_vs_def(home_off, home_def, away_off, away_def))
     factors.append(calc_turnover_diff(home_tov, away_tov, home_tov_fb, away_tov_fb))
-    factors.append(calc_shot_quality(home_efg, away_efg, home_efg_fb, away_efg_fb))
-    factors.append(calc_three_point_edge(
-        home_fg3, home_fg3a_rate, away_fg3, away_fg3a_rate,
-        home_fg3_fb or home_fg3a_fb, away_fg3_fb or away_fg3a_fb
+    # Combined shooting factor (replaces shot_quality + three_point_edge)
+    factors.append(calc_shooting_advantage(
+        home_efg, away_efg, home_fg3, away_fg3,
+        home_efg_fb or home_fg3_fb, away_efg_fb or away_fg3_fb
     ))
-    factors.append(calc_free_throw_rate(home_ft_rate, away_ft_rate, home_ft_fb, away_ft_fb))
+    factors.append(calc_free_throw_diff(home_ft_rate, away_ft_rate, home_ft_fb, away_ft_fb))
     factors.append(calc_rebounding(home_oreb, away_oreb, home_oreb_fb, away_oreb_fb))
     factors.append(calc_home_road_split(home_home_net, away_road_net))
     factors.append(calc_home_court())
@@ -1243,7 +1218,7 @@ def score_game_v3(
     factors.append(calc_pace_control(home_pace, away_pace, home_pace_fb, away_pace_fb))
     factors.append(calc_late_game_creation(home_off, away_off))
     factors.append(calc_coaching())
-    factors.append(calc_shooting_variance(home_fg3a_rate, away_fg3a_rate))
+    factors.append(calc_variance_signal(home_fg3a_rate, away_fg3a_rate))
     factors.append(calc_motivation())
     
     # Debug: Log factor debug info

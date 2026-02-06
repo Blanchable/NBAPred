@@ -641,8 +641,9 @@ class ExcelTracker:
         """
         Compute winrate statistics from the LOG sheet.
         
-        Reads the Excel file, ignores rows where result is blank,
-        and computes stats in Python.
+        Computes W/L in Python from actual scores (Act_Away, Act_Home) and Side,
+        rather than relying on Excel formula caching. This ensures the GUI shows
+        correct win rates immediately without requiring Excel to be opened first.
         
         Returns:
             WinrateStats object with computed statistics
@@ -653,7 +654,8 @@ class ExcelTracker:
             return stats
         
         try:
-            wb = load_workbook(self.file_path, data_only=True)
+            # Use data_only=False to read the raw values, not cached formula results
+            wb = load_workbook(self.file_path, data_only=False)
         except Exception:
             return stats
         
@@ -662,12 +664,51 @@ class ExcelTracker:
         
         log_sheet = wb[LOG_SHEET]
         
+        def _parse_int(val) -> Optional[int]:
+            """Safely parse a value to int, return None if not parseable."""
+            if val is None:
+                return None
+            try:
+                return int(float(val))
+            except (ValueError, TypeError):
+                return None
+        
+        def _compute_result(side: str, act_away: Optional[int], act_home: Optional[int], result_cell) -> Optional[str]:
+            """
+            Compute game result from actual scores and side.
+            
+            Priority:
+            1. If result_cell is explicitly 'W' or 'L', use it
+            2. If actual scores are present, compute from Side and scores
+            3. Otherwise return None (pending)
+            """
+            # Check if result_cell has an explicit W/L (not a formula)
+            if result_cell and isinstance(result_cell, str):
+                result_upper = result_cell.strip().upper()
+                if result_upper in ('W', 'L'):
+                    return result_upper
+            
+            # Compute from actual scores if available
+            if act_away is not None and act_home is not None and side:
+                side_upper = str(side).strip().upper()
+                if side_upper == "HOME":
+                    return "W" if act_home > act_away else "L"
+                elif side_upper == "AWAY":
+                    return "W" if act_away > act_home else "L"
+            
+            return None  # Pending
+        
         # Process each data row
         for row_idx in range(2, log_sheet.max_row + 1):
-            # Get relevant columns (1-indexed: H=8 for bucket, V=22 for result, E=5 for pick)
+            # Column indices (1-indexed):
+            # E=5 (Pick), F=6 (Side), H=8 (Bucket)
+            # T=20 (Act_Away), U=21 (Act_Home), V=22 (Result)
             bucket = log_sheet.cell(row=row_idx, column=8).value  # H - Bucket
             pick_team = log_sheet.cell(row=row_idx, column=5).value  # E - Pick
-            result = log_sheet.cell(row=row_idx, column=22).value  # V - Result
+            side = log_sheet.cell(row=row_idx, column=6).value  # F - Side
+            act_away = _parse_int(log_sheet.cell(row=row_idx, column=20).value)  # T - Act_Away
+            act_home = _parse_int(log_sheet.cell(row=row_idx, column=21).value)  # U - Act_Home
+            result_cell = log_sheet.cell(row=row_idx, column=22).value  # V - Result
             
             if not bucket or not pick_team:
                 continue
@@ -686,9 +727,12 @@ class ExcelTracker:
             elif bucket == "LOW":
                 stats.total_low += 1
             
+            # Compute result (W/L or None for pending)
+            result_final = _compute_result(side, act_away, act_home, result_cell)
+            
             # Check if graded or pending
-            if result and str(result).strip().upper() in ['W', 'L']:
-                is_win = str(result).strip().upper() == 'W'
+            if result_final in ('W', 'L'):
+                is_win = (result_final == 'W')
                 
                 stats.total_graded += 1
                 if is_win:
