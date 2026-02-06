@@ -26,7 +26,7 @@ TEAM_ID_TO_ABBREV = {team['id']: team['abbreviation'] for team in nba_teams.get_
 
 @dataclass
 class PlayerImpact:
-    """Player impact data for lineup adjustment."""
+    """Player impact data for lineup adjustment and roster display."""
     player_name: str
     team: str
     minutes_per_game: float
@@ -36,6 +36,11 @@ class PlayerImpact:
     is_key_player: bool  # Top 6 by impact on team
     impact_rank: int = 0  # 1 = top player, 2 = second, etc.
     is_star: bool = False  # Top 2 player on team
+    # Additional stats for roster display
+    rebounds_per_game: float = 0.0
+    assists_per_game: float = 0.0
+    fg_pct: float = 0.0
+    fg3_pct: float = 0.0
     
     @property
     def player_name_normalized(self) -> str:
@@ -80,6 +85,12 @@ def get_player_stats(
                 mpg = float(row.get("MIN", 0) or 0)
                 ppg = float(row.get("PTS", 0) or 0)
                 
+                # Extract additional stats with safe defaults
+                rpg = float(row.get("REB", 0) or 0)
+                apg = float(row.get("AST", 0) or 0)
+                fg_pct = float(row.get("FG_PCT", 0) or 0) * 100  # Convert to percentage
+                fg3_pct = float(row.get("FG3_PCT", 0) or 0) * 100  # Convert to percentage
+                
                 # Calculate points per minute
                 ppm = ppg / mpg if mpg > 0 else 0
                 
@@ -95,6 +106,10 @@ def get_player_stats(
                     usage_pct=float(row.get("USG_PCT", 0) or 0) * 100 if row.get("USG_PCT") else 20.0,
                     impact_score=impact,
                     is_key_player=False,  # Will be set later
+                    rebounds_per_game=rpg,
+                    assists_per_game=apg,
+                    fg_pct=fg_pct,
+                    fg3_pct=fg3_pct,
                 )
                 
                 if team_abbrev not in team_players:
@@ -151,6 +166,10 @@ def get_fallback_player_stats() -> dict[str, list[PlayerImpact]]:
                 is_key_player=True,
                 impact_rank=i + 1,
                 is_star=(i < 2),  # Top 2 are stars
+                rebounds_per_game=8 - i,
+                assists_per_game=5 - i * 0.5,
+                fg_pct=48.0 - i,
+                fg3_pct=36.0 - i,
             ))
         team_players[team] = players
     

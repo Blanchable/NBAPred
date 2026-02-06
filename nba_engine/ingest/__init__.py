@@ -54,6 +54,13 @@ from .news_absences import (
     merge_news_absences_with_injuries,
     NewsAbsence,
 )
+from .roster import (
+    get_team_roster,
+    get_team_full_name,
+    get_all_team_abbrevs,
+    RosterPlayer,
+    ALL_TEAM_ABBREVS,
+)
 
 __all__ = [
     # Schedule
@@ -102,4 +109,10 @@ __all__ = [
     "fetch_all_news_absences",
     "merge_news_absences_with_injuries",
     "NewsAbsence",
+    # Roster
+    "get_team_roster",
+    "get_team_full_name",
+    "get_all_team_abbrevs",
+    "RosterPlayer",
+    "ALL_TEAM_ABBREVS",
 ]

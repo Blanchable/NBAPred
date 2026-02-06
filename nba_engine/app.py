@@ -105,6 +105,13 @@ class NBAPredictor(tk.Tk):
         self.injuries = []
         self.team_stats = {}
         
+        # Roster tab caches
+        self.roster_cache = {}  # team_abbrev -> list[RosterPlayer]
+        self.player_stats_cache = None  # dict[team] -> list[PlayerImpact]
+        self.todays_games_cache = None  # from get_todays_games()
+        self.injury_rows_cache = []  # parsed InjuryRow list
+        self.roster_loading = False
+        
         # Configure styles
         self.setup_styles()
         
@@ -557,6 +564,11 @@ class NBAPredictor(tk.Tk):
         self.notebook.add(self.injuries_frame, text="  🏥 Injuries  ")
         self.create_injuries_tree()
         
+        # Roster tab
+        self.roster_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.roster_frame, text="  🏀 Roster  ")
+        self.create_roster_view()
+        
         # Log tab
         self.log_frame = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.log_frame, text="  📝 Log  ")
@@ -806,6 +818,475 @@ class NBAPredictor(tk.Tk):
         
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def create_roster_view(self):
+        """Create the roster tab with team selector and player table."""
+        from ingest.roster import get_all_team_abbrevs
+        
+        # Container
+        container = tk.Frame(self.roster_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Top controls bar
+        controls_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        controls_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        # Team selector
+        tk.Label(
+            controls_frame,
+            text="Team:",
+            font=('Segoe UI', 10),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.roster_team_var = tk.StringVar()
+        self.roster_team_combo = ttk.Combobox(
+            controls_frame,
+            textvariable=self.roster_team_var,
+            state='readonly',
+            width=8,
+            values=get_all_team_abbrevs(),
+            font=('Segoe UI', 10)
+        )
+        self.roster_team_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self.roster_team_combo.bind('<<ComboboxSelected>>', self._on_roster_team_selected)
+        
+        # Tonight only checkbox
+        self.roster_tonight_only_var = tk.BooleanVar(value=False)
+        self.roster_tonight_check = ttk.Checkbutton(
+            controls_frame,
+            text="Only teams playing tonight",
+            variable=self.roster_tonight_only_var,
+            command=self._update_roster_team_filter
+        )
+        self.roster_tonight_check.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Refresh button
+        self.roster_refresh_btn = ttk.Button(
+            controls_frame,
+            text="🔄 Refresh",
+            command=lambda: self.refresh_roster_tab(),
+            style='Secondary.TButton'
+        )
+        self.roster_refresh_btn.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Tonight info label
+        self.roster_tonight_var = tk.StringVar(value="Select a team")
+        tk.Label(
+            controls_frame,
+            textvariable=self.roster_tonight_var,
+            font=('Segoe UI', 10, 'italic'),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text_muted']
+        ).pack(side=tk.LEFT)
+        
+        # Status filter frame
+        filter_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        filter_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+        
+        # Hide OUT checkbox
+        self.roster_hide_out_var = tk.BooleanVar(value=False)
+        self.roster_hide_out_check = ttk.Checkbutton(
+            filter_frame,
+            text="Hide OUT/Doubtful",
+            variable=self.roster_hide_out_var,
+            command=self._apply_roster_filters
+        )
+        self.roster_hide_out_check.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Search box
+        tk.Label(
+            filter_frame,
+            text="Search:",
+            font=('Segoe UI', 9),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text_muted']
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.roster_search_var = tk.StringVar()
+        self.roster_search_var.trace_add('write', lambda *_: self._apply_roster_filters())
+        self.roster_search_entry = ttk.Entry(
+            filter_frame,
+            textvariable=self.roster_search_var,
+            width=20,
+            font=('Segoe UI', 9)
+        )
+        self.roster_search_entry.pack(side=tk.LEFT)
+        
+        # Roster treeview
+        tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        columns = (
+            'name', 'pos', 'role', 'status', 'tonight',
+            'mpg', 'ppg', 'rpg', 'apg', 'fg_pct', 'fg3_pct', 'usg'
+        )
+        
+        self.roster_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show='headings',
+            selectmode='browse'
+        )
+        
+        # Configure columns
+        col_configs = [
+            ('name', 'Player', 150, 'w'),
+            ('pos', 'Pos', 45, 'center'),
+            ('role', 'Role', 70, 'center'),
+            ('status', 'Status', 85, 'center'),
+            ('tonight', 'Tonight', 60, 'center'),
+            ('mpg', 'MPG', 50, 'center'),
+            ('ppg', 'PPG', 50, 'center'),
+            ('rpg', 'RPG', 45, 'center'),
+            ('apg', 'APG', 45, 'center'),
+            ('fg_pct', 'FG%', 50, 'center'),
+            ('fg3_pct', '3P%', 50, 'center'),
+            ('usg', 'USG%', 50, 'center'),
+        ]
+        
+        for col_id, heading, width, anchor in col_configs:
+            self.roster_tree.heading(col_id, text=heading)
+            self.roster_tree.column(col_id, width=width, anchor=anchor)
+        
+        # Scrollbar
+        roster_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.roster_tree.yview)
+        self.roster_tree.configure(yscrollcommand=roster_scroll.set)
+        
+        self.roster_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        roster_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure row tags for highlighting
+        self.roster_tree.tag_configure('star', foreground=COLORS['primary'], font=('Segoe UI', 9, 'bold'))
+        self.roster_tree.tag_configure('key', foreground=COLORS['text'])
+        self.roster_tree.tag_configure('out', foreground=COLORS['danger'])
+        self.roster_tree.tag_configure('doubtful', foreground='#a55a00')
+        self.roster_tree.tag_configure('questionable', foreground=COLORS['warning'])
+        self.roster_tree.tag_configure('probable', foreground='#2d7a2d')
+        
+        # Player detail panel (bottom)
+        detail_frame = tk.Frame(container, bg=COLORS['bg'], height=80)
+        detail_frame.pack(fill=tk.X, padx=10, pady=5)
+        detail_frame.pack_propagate(False)
+        
+        self.roster_detail_var = tk.StringVar(value="Select a player to see details")
+        tk.Label(
+            detail_frame,
+            textvariable=self.roster_detail_var,
+            font=('Segoe UI', 10),
+            bg=COLORS['bg'],
+            fg=COLORS['text'],
+            justify=tk.LEFT,
+            anchor='w'
+        ).pack(fill=tk.X, padx=10, pady=10)
+        
+        # Bind selection
+        self.roster_tree.bind('<<TreeviewSelect>>', self._on_roster_player_selected)
+        
+        # Store full roster data for filtering
+        self._roster_full_data = []
+    
+    def _on_roster_team_selected(self, event=None):
+        """Handle team selection in roster dropdown."""
+        team = self.roster_team_var.get()
+        if team:
+            self.refresh_roster_tab(team)
+    
+    def _update_roster_team_filter(self):
+        """Update team dropdown based on tonight-only filter."""
+        from ingest.roster import get_all_team_abbrevs
+        
+        if self.roster_tonight_only_var.get():
+            # Filter to only teams playing tonight
+            teams_tonight = set()
+            if self.todays_games_cache:
+                for game in self.todays_games_cache:
+                    teams_tonight.add(game.away_team)
+                    teams_tonight.add(game.home_team)
+            
+            if teams_tonight:
+                self.roster_team_combo['values'] = sorted(teams_tonight)
+            else:
+                self.roster_team_combo['values'] = get_all_team_abbrevs()
+        else:
+            self.roster_team_combo['values'] = get_all_team_abbrevs()
+    
+    def _apply_roster_filters(self):
+        """Apply search and status filters to roster display."""
+        # Clear current display
+        for item in self.roster_tree.get_children():
+            self.roster_tree.delete(item)
+        
+        search_term = self.roster_search_var.get().lower().strip()
+        hide_out = self.roster_hide_out_var.get()
+        
+        for row_data in self._roster_full_data:
+            # Apply search filter
+            if search_term and search_term not in row_data['name'].lower():
+                continue
+            
+            # Apply status filter
+            status = row_data.get('status', '').upper()
+            if hide_out and status in ('OUT', 'DOUBTFUL'):
+                continue
+            
+            # Insert row
+            values = (
+                row_data['name'],
+                row_data['pos'],
+                row_data['role'],
+                row_data['status'],
+                row_data['tonight'],
+                row_data['mpg'],
+                row_data['ppg'],
+                row_data['rpg'],
+                row_data['apg'],
+                row_data['fg_pct'],
+                row_data['fg3_pct'],
+                row_data['usg'],
+            )
+            self.roster_tree.insert('', tk.END, values=values, tags=row_data.get('tags', ()))
+    
+    def _on_roster_player_selected(self, event=None):
+        """Handle player selection in roster tree."""
+        selection = self.roster_tree.selection()
+        if not selection:
+            return
+        
+        item = self.roster_tree.item(selection[0])
+        values = item['values']
+        
+        if values:
+            name = values[0]
+            pos = values[1]
+            role = values[2]
+            status = values[3]
+            tonight = values[4]
+            mpg = values[5]
+            ppg = values[6]
+            rpg = values[7]
+            apg = values[8]
+            fg = values[9]
+            fg3 = values[10]
+            usg = values[11]
+            
+            detail = f"{name} ({pos}) - {role}\n"
+            detail += f"Status: {status}  |  Tonight: {tonight}\n"
+            detail += f"Stats: {mpg} MPG, {ppg} PPG, {rpg} RPG, {apg} APG  |  Shooting: {fg} FG%, {fg3} 3P%  |  Usage: {usg}%"
+            
+            self.roster_detail_var.set(detail)
+    
+    def refresh_roster_tab(self, team_abbrev: str = None):
+        """Refresh roster data for the selected team."""
+        if self.roster_loading:
+            return
+        
+        if team_abbrev is None:
+            team_abbrev = self.roster_team_var.get()
+        
+        if not team_abbrev:
+            return
+        
+        self.roster_loading = True
+        self.roster_refresh_btn.config(state=tk.DISABLED)
+        self.roster_tonight_var.set("Loading...")
+        self.log(f"Loading roster for {team_abbrev}...")
+        
+        def _fetch_roster():
+            try:
+                from ingest.schedule import get_todays_games, get_current_season
+                from ingest.roster import get_team_roster
+                from ingest.player_stats import get_player_stats
+                from ingest.injuries import find_latest_injury_pdf, download_injury_pdf, parse_injury_pdf
+                from ingest.availability import normalize_player_name
+                
+                season = get_current_season()
+                
+                # Fetch today's games (cache it)
+                if self.todays_games_cache is None:
+                    games, _, _ = get_todays_games()
+                    self.todays_games_cache = games
+                
+                # Ensure player stats cache exists
+                if self.player_stats_cache is None:
+                    self.player_stats_cache = get_player_stats(season=season)
+                
+                # Fetch roster for the selected team (use cache if available)
+                if team_abbrev not in self.roster_cache:
+                    roster = get_team_roster(team_abbrev, season=season)
+                    self.roster_cache[team_abbrev] = roster
+                else:
+                    roster = self.roster_cache[team_abbrev]
+                
+                # Fetch injury report if needed
+                if not self.injury_rows_cache:
+                    try:
+                        pdf_path = find_latest_injury_pdf()
+                        if not pdf_path:
+                            pdf_path = download_injury_pdf()
+                        if pdf_path:
+                            self.injury_rows_cache = parse_injury_pdf(pdf_path)
+                    except Exception as e:
+                        print(f"  Could not load injury report: {e}")
+                
+                # Build injury lookup
+                injury_map = {}
+                for row in self.injury_rows_cache:
+                    key = (row.team, normalize_player_name(row.player))
+                    status = row.get_canonical_status() if hasattr(row, 'get_canonical_status') else row.status
+                    injury_map[key] = status
+                
+                # Get player impacts for this team
+                impacts = self.player_stats_cache.get(team_abbrev, [])
+                stats_map = {}
+                for impact in impacts:
+                    name_norm = normalize_player_name(impact.player_name)
+                    stats_map[name_norm] = impact
+                
+                # Determine if team plays tonight
+                tonight_game = None
+                if self.todays_games_cache:
+                    for game in self.todays_games_cache:
+                        if game.away_team == team_abbrev or game.home_team == team_abbrev:
+                            tonight_game = game
+                            break
+                
+                # Build tonight summary
+                if tonight_game:
+                    if tonight_game.home_team == team_abbrev:
+                        opponent = tonight_game.away_team
+                        tonight_summary = f"Tonight: vs {opponent} (Home)"
+                    else:
+                        opponent = tonight_game.home_team
+                        tonight_summary = f"Tonight: @ {opponent} (Away)"
+                else:
+                    tonight_summary = "No game today"
+                
+                # Build row data
+                rows = []
+                for player in roster:
+                    name_norm = normalize_player_name(player.player_name)
+                    impact = stats_map.get(name_norm)
+                    
+                    # Get stats
+                    if impact:
+                        mpg = f"{impact.minutes_per_game:.1f}"
+                        ppg = f"{impact.points_per_game:.1f}"
+                        rpg = f"{impact.rebounds_per_game:.1f}"
+                        apg = f"{impact.assists_per_game:.1f}"
+                        fg_pct = f"{impact.fg_pct:.1f}"
+                        fg3_pct = f"{impact.fg3_pct:.1f}"
+                        usg = f"{impact.usage_pct:.1f}"
+                        
+                        # Determine role
+                        if impact.is_star:
+                            role = "Star"
+                        elif impact.is_key_player:
+                            role = "Key"
+                        elif impact.minutes_per_game >= 15:
+                            role = "Rotation"
+                        else:
+                            role = "Bench"
+                    else:
+                        mpg = ppg = rpg = apg = fg_pct = fg3_pct = usg = "--"
+                        role = "Bench"
+                    
+                    # Determine status
+                    injury_key = (team_abbrev, name_norm)
+                    status = injury_map.get(injury_key, "Available")
+                    if status.upper() in ("AVAILABLE", ""):
+                        status = "Available"
+                    
+                    # Determine tonight
+                    if not tonight_game:
+                        tonight = "N/A"
+                    elif status.upper() in ("OUT", "DOUBTFUL"):
+                        tonight = "No"
+                    elif status.upper() == "QUESTIONABLE":
+                        tonight = "Maybe"
+                    else:
+                        tonight = "Yes"
+                    
+                    # Determine tags for highlighting
+                    tags = []
+                    status_upper = status.upper()
+                    if status_upper == "OUT":
+                        tags.append('out')
+                    elif status_upper == "DOUBTFUL":
+                        tags.append('doubtful')
+                    elif status_upper == "QUESTIONABLE":
+                        tags.append('questionable')
+                    elif status_upper == "PROBABLE":
+                        tags.append('probable')
+                    
+                    if impact:
+                        if impact.is_star:
+                            tags.append('star')
+                        elif impact.is_key_player:
+                            tags.append('key')
+                    
+                    row_data = {
+                        'name': player.player_name,
+                        'pos': player.position or "--",
+                        'role': role,
+                        'status': status,
+                        'tonight': tonight,
+                        'mpg': mpg,
+                        'ppg': ppg,
+                        'rpg': rpg,
+                        'apg': apg,
+                        'fg_pct': fg_pct,
+                        'fg3_pct': fg3_pct,
+                        'usg': usg,
+                        'tags': tuple(tags),
+                    }
+                    rows.append(row_data)
+                
+                # Sort: stars first, then by role, then by name
+                role_order = {'Star': 0, 'Key': 1, 'Rotation': 2, 'Bench': 3}
+                rows.sort(key=lambda r: (role_order.get(r['role'], 4), r['name']))
+                
+                # Update UI from main thread
+                self.after(0, lambda: self._render_roster_rows(rows, tonight_summary))
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error loading roster: {e}"
+                print(error_msg)
+                traceback.print_exc()
+                self.after(0, lambda: self._roster_load_error(error_msg))
+        
+        # Run in background thread
+        thread = threading.Thread(target=_fetch_roster, daemon=True)
+        thread.start()
+    
+    def _render_roster_rows(self, rows: list, tonight_summary: str):
+        """Render roster rows in the treeview."""
+        # Store full data for filtering
+        self._roster_full_data = rows
+        
+        # Update tonight label
+        self.roster_tonight_var.set(tonight_summary)
+        
+        # Update team filter (in case games cache was populated)
+        self._update_roster_team_filter()
+        
+        # Apply filters and render
+        self._apply_roster_filters()
+        
+        # Re-enable refresh button
+        self.roster_refresh_btn.config(state=tk.NORMAL)
+        self.roster_loading = False
+        
+        self.log(f"  Loaded {len(rows)} players for {self.roster_team_var.get()}")
+    
+    def _roster_load_error(self, error_msg: str):
+        """Handle roster load error."""
+        self.roster_tonight_var.set("Error loading roster")
+        self.roster_refresh_btn.config(state=tk.NORMAL)
+        self.roster_loading = False
+        self.log(f"  {error_msg}")
     
     def log(self, message: str):
         """Add a message to the log."""
