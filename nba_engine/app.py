@@ -288,6 +288,18 @@ class NBAPredictor(tk.Tk):
         right_frame = ttk.Frame(top_frame, style='TFrame')
         right_frame.pack(side=tk.RIGHT)
         
+        # Auto-poll toggle
+        self.auto_poll_var = tk.BooleanVar(value=False)
+        self.auto_poll_check = ttk.Checkbutton(
+            right_frame,
+            text="Auto-check (30m)",
+            variable=self.auto_poll_var,
+            command=self.toggle_auto_poll,
+            style='TCheckbutton'
+        )
+        self.auto_poll_check.pack(side=tk.LEFT, padx=(0, 10))
+        self.auto_poll_job = None
+        
         # Status
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(
@@ -890,6 +902,59 @@ class NBAPredictor(tk.Tk):
             self.log(f"Error refreshing stats from DB: {e}")
             # Fall back to Excel if DB fails
             self.refresh_winrates()
+    
+    def toggle_auto_poll(self):
+        """Toggle automatic score polling every 30 minutes."""
+        if self.auto_poll_var.get():
+            # Enable auto-poll
+            self.log("Auto-poll enabled - checking scores every 30 minutes")
+            self.schedule_next_poll()
+        else:
+            # Disable auto-poll
+            if self.auto_poll_job:
+                self.after_cancel(self.auto_poll_job)
+                self.auto_poll_job = None
+            self.log("Auto-poll disabled")
+    
+    def schedule_next_poll(self):
+        """Schedule the next automatic score check."""
+        if not self.auto_poll_var.get():
+            return
+        
+        # 30 minutes = 30 * 60 * 1000 milliseconds
+        poll_interval_ms = 30 * 60 * 1000
+        self.auto_poll_job = self.after(poll_interval_ms, self.auto_check_scores)
+    
+    def auto_check_scores(self):
+        """Automatically check scores (called by timer)."""
+        if not self.auto_poll_var.get():
+            return
+        
+        self.log(f"\n[Auto-poll] Checking scores at {datetime.now().strftime('%H:%M:%S')}")
+        
+        def _auto_check():
+            try:
+                from datetime import timezone, timedelta
+                
+                now_utc = datetime.now(timezone.utc)
+                et_offset = timedelta(hours=-5)
+                now_et = now_utc + et_offset
+                today = now_et.strftime("%Y-%m-%d")
+                
+                games_updated, picks_graded, picks_pending = grade_picks_for_date(today)
+                
+                self.log(f"  Graded: {picks_graded}, Pending: {picks_pending}")
+                
+                self.after(0, self.refresh_stats_from_db)
+                
+            except Exception as e:
+                self.log(f"  [Auto-poll] Error: {e}")
+            finally:
+                # Schedule next poll
+                self.after(0, self.schedule_next_poll)
+        
+        thread = threading.Thread(target=_auto_check, daemon=True)
+        thread.start()
     
     def check_scores(self):
         """Check scores for today's games and grade picks."""
