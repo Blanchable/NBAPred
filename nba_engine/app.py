@@ -36,15 +36,22 @@ from paths import (
     DATA_ROOT,
 )
 
-# Import storage module for SQLite persistence
+# Import storage module for SQLite persistence with daily slate + locking
 from storage import (
     init_db,
-    insert_run,
+    upsert_daily_slate,
     upsert_game,
-    upsert_pick,
+    upsert_daily_pick_if_unlocked,
+    get_daily_picks,
+    lock_all_started_games,
     compute_stats,
     get_db_path,
     generate_game_id,
+    get_now_local,
+    get_today_date_local,
+    # Legacy compatibility
+    insert_run,
+    upsert_pick,
 )
 
 # Import services for score checking
@@ -556,13 +563,13 @@ class NBAPredictor(tk.Tk):
         self.create_log_view()
     
     def create_predictions_tree(self):
-        """Create the predictions treeview with confidence and totals display."""
+        """Create the predictions treeview with confidence, totals, and lock status display."""
         # Container with card-like appearance
         container = tk.Frame(self.predictions_frame, bg=COLORS['card_bg'])
         container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         columns = (
-            'matchup', 'pick', 'side', 'conf_pct', 'bucket', 
+            'matchup', 'pick', 'side', 'conf_pct', 'bucket', 'locked',
             'pred_score', 'total', 'total_range', 'edge', 'margin'
         )
         
@@ -578,13 +585,14 @@ class NBAPredictor(tk.Tk):
             ('matchup', 'Matchup', 110),
             ('pick', 'Pick', 55),
             ('side', 'Side', 55),
-            ('conf_pct', 'Conf %', 70),
-            ('bucket', 'Bucket', 70),
-            ('pred_score', 'Pred Score', 100),
-            ('total', 'Total', 55),
-            ('total_range', 'Range', 80),
-            ('edge', 'Edge', 60),
-            ('margin', 'Margin', 65),
+            ('conf_pct', 'Conf %', 65),
+            ('bucket', 'Bucket', 65),
+            ('locked', 'Locked', 55),
+            ('pred_score', 'Pred Score', 95),
+            ('total', 'Total', 50),
+            ('total_range', 'Range', 75),
+            ('edge', 'Edge', 55),
+            ('margin', 'Margin', 60),
         ]
         
         for col_id, heading, width in col_configs:
@@ -601,10 +609,11 @@ class NBAPredictor(tk.Tk):
         # Bind selection
         self.pred_tree.bind('<<TreeviewSelect>>', self.on_prediction_selected)
         
-        # Configure row tags for confidence buckets
+        # Configure row tags for confidence buckets and lock status
         self.pred_tree.tag_configure('high', background='#d4edda')
         self.pred_tree.tag_configure('medium', background='#fff3cd')
         self.pred_tree.tag_configure('low', background='#f8d7da')
+        self.pred_tree.tag_configure('locked', foreground='#666666')
     
     def create_factors_view(self):
         """Create the factor breakdown view with confidence summary."""
@@ -993,63 +1002,90 @@ class NBAPredictor(tk.Tk):
         thread = threading.Thread(target=_check, daemon=True)
         thread.start()
     
-    def persist_predictions_to_db(self, scores: list, run_date: str) -> int:
+    def persist_predictions_to_db(self, scores: list, run_date: str, games_with_times: list = None) -> tuple:
         """
-        Persist predictions to the SQLite database.
+        Persist predictions to the SQLite database using daily slate with per-game locking.
+        
+        Games that have already started will not be overwritten (locked).
+        Games that haven't started will be overwritten with the latest prediction.
         
         Args:
             scores: List of GameScore objects
             run_date: Date of the run (YYYY-MM-DD)
+            games_with_times: Optional list of games with start times from API
         
         Returns:
-            Number of picks saved
+            Tuple of (saved_count, locked_count)
         """
-        from uuid import uuid4
+        now_local = get_now_local()
         
-        # Create a new run
-        run_id = insert_run(run_date, model_version="v3.2")
+        # Create/update daily slate
+        upsert_daily_slate(run_date, now_local, model_version="v3.2")
+        
+        # Build mapping of game times from API data if available
+        game_times = {}
+        if games_with_times:
+            for g in games_with_times:
+                key = f"{g.away_team}@{g.home_team}"
+                game_times[key] = {
+                    'game_id': g.game_id,
+                    'start_time_utc': getattr(g, 'start_time_utc', None),
+                }
         
         saved = 0
+        locked = 0
+        
         for score in scores:
             # Determine game_id - use API game_id if available, else generate
-            game_id = getattr(score, 'game_id', None)
+            matchup_key = f"{score.away_team}@{score.home_team}"
+            api_info = game_times.get(matchup_key, {})
+            
+            game_id = api_info.get('game_id') or getattr(score, 'game_id', None)
             if not game_id:
                 game_id = generate_game_id(run_date, score.away_team, score.home_team)
             
-            # Upsert game record
+            start_time_utc = api_info.get('start_time_utc')
+            
+            # Upsert game record with start time
             upsert_game(
                 game_id=game_id,
                 game_date=run_date,
                 away_team=score.away_team,
                 home_team=score.home_team,
+                start_time_utc=start_time_utc,
                 status="scheduled",
             )
             
             # Determine pick side
             pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
             
-            # Create pick record
-            pick_id = str(uuid4())
-            upsert_pick(
-                pick_id=pick_id,
-                run_id=run_id,
-                game_id=game_id,
-                matchup=f"{score.away_team} @ {score.home_team}",
-                pick_team=score.predicted_winner,
-                pick_side=pick_side,
-                conf_pct=score.confidence_pct_value,
-                bucket=score.confidence_bucket,
-                pred_away_score=score.display_away_points,
-                pred_home_score=score.display_home_points,
-                pred_total=score.predicted_total,
-                range_low=score.total_range_low,
-                range_high=score.total_range_high,
-                internal_edge=score.edge_score_total,
-                internal_margin=score.projected_margin_home,
+            # Build pick data
+            pick_data = {
+                'matchup': f"{score.away_team} @ {score.home_team}",
+                'pick_team': score.predicted_winner,
+                'pick_side': pick_side,
+                'conf_pct': score.confidence_pct_value,
+                'bucket': score.confidence_bucket,
+                'pred_away_score': score.display_away_points,
+                'pred_home_score': score.display_home_points,
+                'pred_total': score.predicted_total,
+                'range_low': score.total_range_low,
+                'range_high': score.total_range_high,
+                'internal_edge': score.edge_score_total,
+                'internal_margin': score.projected_margin_home,
+            }
+            
+            # Try to save pick (will be blocked if game has started)
+            was_saved, is_locked = upsert_daily_pick_if_unlocked(
+                run_date, game_id, pick_data, now_local
             )
-            saved += 1
+            
+            if was_saved:
+                saved += 1
+            if is_locked:
+                locked += 1
         
-        return saved
+        return saved, locked
     
     def start_prediction_run(self):
         """Start the prediction run in a background thread."""
@@ -1303,10 +1339,13 @@ class NBAPredictor(tk.Tk):
                 )
                 entries.append(entry)
             
-            # Save to SQLite database (primary storage)
+            # Save to SQLite database (primary storage) with per-game locking
             try:
-                db_saved = self.persist_predictions_to_db(self.scores, run_date)
-                self.log(f"  Saved {db_saved} predictions to database")
+                db_saved, db_locked = self.persist_predictions_to_db(self.scores, run_date, games)
+                if db_locked > 0:
+                    self.log(f"  Saved {db_saved} predictions to database ({db_locked} locked - already started)")
+                else:
+                    self.log(f"  Saved {db_saved} predictions to database")
                 self.log(f"  DB location: {get_db_path()}")
             except Exception as e:
                 self.log(f"  Warning: Could not save to DB: {e}")
@@ -1344,10 +1383,20 @@ class NBAPredictor(tk.Tk):
             self.after(0, lambda: self.run_button.config(state=tk.NORMAL))
     
     def update_predictions_display(self):
-        """Update the predictions treeview with confidence and totals display."""
+        """Update the predictions treeview with confidence, totals, and lock status display."""
         # Clear existing
         for item in self.pred_tree.get_children():
             self.pred_tree.delete(item)
+        
+        # Get lock status from database
+        today = get_today_date_local()
+        daily_picks = get_daily_picks(today)
+        
+        # Build lock status lookup
+        lock_status = {}
+        for pick in daily_picks:
+            key = f"{pick.get('away_team', '')} @ {pick.get('home_team', '')}"
+            lock_status[key] = pick.get('locked', 0) == 1
         
         # Add predictions
         for score in self.scores:
@@ -1355,13 +1404,22 @@ class NBAPredictor(tk.Tk):
             pick_side = "HOME" if score.predicted_winner == score.home_team else "AWAY"
             conf_bucket = score.confidence_bucket
             
+            # Check if locked
+            is_locked = lock_status.get(matchup, False)
+            locked_display = "🔒" if is_locked else ""
+            
             # Format predicted score
             pred_score = f"{score.display_away_points}-{score.display_home_points}"
             
-            # Determine tag
+            # Determine tags
+            tags = []
             tag = conf_bucket.lower()
             if tag == 'med':
                 tag = 'medium'
+            tags.append(tag)
+            
+            if is_locked:
+                tags.append('locked')
             
             self.pred_tree.insert('', tk.END, values=(
                 matchup,
@@ -1369,12 +1427,13 @@ class NBAPredictor(tk.Tk):
                 pick_side,
                 f"{score.confidence_pct_value:.1f}%",
                 conf_bucket,
+                locked_display,
                 pred_score,
                 score.display_total,
                 score.display_total_range,
                 f"{score.edge_score_total:+.1f}",
                 f"{score.projected_margin_home:+.1f}",
-            ), tags=(tag,))
+            ), tags=tuple(tags))
     
     def update_injuries_display(self):
         """Update the injuries treeview."""
