@@ -445,7 +445,7 @@ class NBAPredictor(tk.Tk):
                 get_team_rest_days,
                 get_fallback_team_strength,
             )
-            from ingest.player_stats import get_player_stats, get_fallback_player_stats
+            from ingest.player_stats import get_player_stats, get_fallback_player_stats, ensure_team_players
             from ingest.injuries import (
                 find_latest_injury_pdf,
                 download_injury_pdf,
@@ -508,6 +508,10 @@ class NBAPredictor(tk.Tk):
             else:
                 total_players = sum(len(p) for p in player_stats.values())
                 self.log(f"  Loaded {total_players} players")
+
+            # Ensure every team playing today has player data (fallback if missing)
+            teams_today = list(set([g.home_team for g in games] + [g.away_team for g in games]))
+            player_stats = ensure_team_players(player_stats, teams_today)
             
             # Get rest days
             self.log("\n[5/7] Calculating rest days...")
