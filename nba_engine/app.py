@@ -1135,9 +1135,14 @@ class NBAPredictor(tk.Tk):
                     games, _, _ = get_todays_games()
                     self.todays_games_cache = games
                 
-                # Ensure player stats cache exists
+                # Ensure player stats cache exists (non-fatal if it fails)
                 if self.player_stats_cache is None:
-                    self.player_stats_cache = get_player_stats(season=season)
+                    try:
+                        self.player_stats_cache = get_player_stats(season=season)
+                    except Exception as ps_err:
+                        print(f"  ⚠ Player stats fetch failed: {ps_err}")
+                        print("  ⚠ Roster will display without stat enrichment.")
+                        self.player_stats_cache = {}
                 
                 # Fetch roster for the selected team (use cache if available)
                 if team_abbrev not in self.roster_cache:
@@ -1170,6 +1175,9 @@ class NBAPredictor(tk.Tk):
                 for impact in impacts:
                     name_norm = normalize_player_name(impact.player_name)
                     stats_map[name_norm] = impact
+
+                if not impacts:
+                    print(f"  ⚠ Player stats missing for {team_abbrev}, showing roster without stat enrichment.")
                 
                 # Determine if team plays tonight
                 tonight_game = None
