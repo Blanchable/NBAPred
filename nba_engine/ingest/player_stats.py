@@ -41,6 +41,9 @@ class PlayerImpact:
     assists_per_game: float = 0.0
     fg_pct: float = 0.0
     fg3_pct: float = 0.0
+    steals_per_game: float = 0.0
+    blocks_per_game: float = 0.0
+    turnovers_per_game: float = 0.0
     threes_made_per_game: float = 0.0  # FG3M per game for projections
     player_id: int = 0  # NBA player ID
     
@@ -110,6 +113,11 @@ def get_player_stats(
                 # Extract 3-pointers made per game (FG3M)
                 fg3m = float(row.get("FG3M", 0) or 0)
                 
+                # Extract defensive / turnover stats
+                spg = float(row.get("STL", 0) or 0)
+                bpg = float(row.get("BLK", 0) or 0)
+                topg = float(row.get("TOV", 0) or 0)
+                
                 # Get player ID
                 player_id = int(row.get("PLAYER_ID", 0) or 0)
                 
@@ -132,6 +140,9 @@ def get_player_stats(
                     assists_per_game=apg,
                     fg_pct=fg_pct,
                     fg3_pct=fg3_pct,
+                    steals_per_game=spg,
+                    blocks_per_game=bpg,
+                    turnovers_per_game=topg,
                     threes_made_per_game=fg3m,
                     player_id=player_id,
                 )

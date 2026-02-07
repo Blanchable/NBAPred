@@ -1207,16 +1207,21 @@ class NBAPredictor(tk.Tk):
                 else:
                     tonight_summary = "No game today"
                 
-                # Build stats map from whatever is already cached (may be empty)
+                # Build stats maps from whatever is already cached (may be empty)
                 stats_map = {}
+                stats_by_id = {}
                 need_stats_fetch = self.player_stats_cache is None
                 if self.player_stats_cache:
                     for impact in self.player_stats_cache.get(team_abbrev, []):
                         stats_map[normalize_player_name(impact.player_name)] = impact
+                        pid = getattr(impact, 'player_id', 0) or 0
+                        if pid:
+                            stats_by_id[pid] = impact
                 
                 # Render roster immediately with whatever data is available
                 rows = self._build_roster_row_data(
-                    roster, stats_map, injury_map, tonight_game, team_abbrev
+                    roster, stats_map, injury_map, tonight_game, team_abbrev,
+                    stats_by_id=stats_by_id,
                 )
                 ts = tonight_summary
                 self.after(0, lambda: self._render_roster_rows(rows, ts))
@@ -1234,10 +1239,15 @@ class NBAPredictor(tk.Tk):
                     new_impacts = self.player_stats_cache.get(team_abbrev, [])
                     if new_impacts:
                         stats_map = {}
+                        stats_by_id = {}
                         for impact in new_impacts:
                             stats_map[normalize_player_name(impact.player_name)] = impact
+                            pid = getattr(impact, 'player_id', 0) or 0
+                            if pid:
+                                stats_by_id[pid] = impact
                         rows = self._build_roster_row_data(
-                            roster, stats_map, injury_map, tonight_game, team_abbrev
+                            roster, stats_map, injury_map, tonight_game, team_abbrev,
+                            stats_by_id=stats_by_id,
                         )
                         self.after(0, lambda: self._render_roster_rows(rows, ts))
                         self.after(0, lambda: self.log("  Player stats loaded — roster enriched."))
@@ -1278,18 +1288,27 @@ class NBAPredictor(tk.Tk):
         
         self.log(f"  Loaded {len(rows)} players for {self.roster_team_var.get()}")
     
-    def _build_roster_row_data(self, roster, stats_map, injury_map, tonight_game, team_abbrev):
+    def _build_roster_row_data(self, roster, stats_map, injury_map, tonight_game, team_abbrev, stats_by_id=None):
         """Build row data dicts for the roster treeview.
 
         Extracted so it can be called twice: once for an immediate render
         (possibly without stats) and again after stats arrive.
+
+        Uses player_id for joining when available, falls back to name.
         """
         from ingest.availability import normalize_player_name
+
+        if stats_by_id is None:
+            stats_by_id = {}
 
         rows = []
         for player in roster:
             name_norm = normalize_player_name(player.player_name)
-            impact = stats_map.get(name_norm)
+            # Prefer player_id join, fall back to normalized name
+            pid = getattr(player, 'player_id', 0) or 0
+            impact = stats_by_id.get(pid) if pid else None
+            if impact is None:
+                impact = stats_map.get(name_norm)
 
             # Get stats
             if impact:
@@ -2305,6 +2324,24 @@ class NBAPredictor(tk.Tk):
             else:
                 self.log("  All teams stable (instability < 0.10)")
             
+            # Compute schedule stress per game
+            self.log("\n  Computing schedule stress...")
+            from services.schedule_stress import compute_game_stress
+            from datetime import datetime as _dt
+            today_str = _dt.now().strftime("%Y-%m-%d")
+            stress_cache = {}  # (home, away) -> {team: TeamStressContext}
+            for game in games:
+                try:
+                    stress_ctx = compute_game_stress(
+                        game.home_team, game.away_team, today_str, season=season, timeout=30
+                    )
+                    stress_cache[(game.home_team, game.away_team)] = stress_ctx
+                    for t, ctx in stress_ctx.items():
+                        if ctx.is_b2b or ctx.games_last_4 >= 3:
+                            self.log(f"    {t}: stress={ctx.normalized:.2f} (B2B={ctx.is_b2b}, G4={ctx.games_last_4}, travel={ctx.travel_km:.0f}km)")
+                except Exception as e:
+                    print(f"  Schedule stress failed for {game.away_team}@{game.home_team}: {e}")
+            
             # Generate predictions
             self.log("\n[7/7] Generating predictions...")
             scores = []
@@ -2349,6 +2386,15 @@ class NBAPredictor(tk.Tk):
                 home_injuries = [inj for inj in injuries if getattr(inj, 'team', '').upper() == game.home_team.upper()]
                 away_injuries = [inj for inj in injuries if getattr(inj, 'team', '').upper() == game.away_team.upper()]
                 
+                # Get schedule stress for this game
+                game_stress = stress_cache.get((game.home_team, game.away_team), {})
+                h_stress = game_stress.get(game.home_team)
+                a_stress = game_stress.get(game.away_team)
+                h_stress_norm = h_stress.normalized if h_stress else 0.0
+                a_stress_norm = a_stress.normalized if a_stress else 0.0
+                h_stress_str = f"B2B={h_stress.is_b2b},G4={h_stress.games_last_4},T={h_stress.travel_km:.0f}km" if h_stress else ""
+                a_stress_str = f"B2B={a_stress.is_b2b},G4={a_stress.games_last_4},T={a_stress.travel_km:.0f}km" if a_stress else ""
+                
                 score = score_game_v3(
                     home_team=game.home_team,
                     away_team=game.away_team,
@@ -2364,6 +2410,10 @@ class NBAPredictor(tk.Tk):
                     away_injuries=away_injuries,
                     instability_home=instability_map.get(game.home_team, 0.0),
                     instability_away=instability_map.get(game.away_team, 0.0),
+                    home_stress_norm=h_stress_norm,
+                    away_stress_norm=a_stress_norm,
+                    home_stress_inputs=h_stress_str,
+                    away_stress_inputs=a_stress_str,
                 )
                 
                 score.game_id = game.game_id
@@ -2635,8 +2685,14 @@ class NBAPredictor(tk.Tk):
                 )
                 rw_home = getattr(score, 'recency_weight_home', 0.20)
                 rw_away = getattr(score, 'recency_weight_away', 0.20)
+                # Check if recent metrics were actually available
+                try:
+                    from ingest.team_stats import recent_metrics_available
+                    recency_status = "" if recent_metrics_available() else " [season-only]"
+                except Exception:
+                    recency_status = ""
                 self.factor_recency_var.set(
-                    f"{score.home_team} {rw_home:.0%}  /  {score.away_team} {rw_away:.0%}"
+                    f"{score.home_team} {rw_home:.0%}  /  {score.away_team} {rw_away:.0%}{recency_status}"
                 )
                 
                 # Display factors
