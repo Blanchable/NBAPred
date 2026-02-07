@@ -1130,26 +1130,30 @@ class NBAPredictor(tk.Tk):
                 
                 season = get_current_season()
                 
-                # Fetch today's games (cache it)
-                if self.todays_games_cache is None:
-                    games, _, _ = get_todays_games()
-                    self.todays_games_cache = games
+                # ── Phase 1: roster + schedule + injuries (fast) ──────
                 
-                # Ensure player stats cache exists (non-fatal if it fails)
-                if self.player_stats_cache is None:
-                    try:
-                        self.player_stats_cache = get_player_stats(season=season)
-                    except Exception as ps_err:
-                        print(f"  ⚠ Player stats fetch failed: {ps_err}")
-                        print("  ⚠ Roster will display without stat enrichment.")
-                        self.player_stats_cache = {}
-                
-                # Fetch roster for the selected team (use cache if available)
+                # Fetch roster FIRST — this is the critical data
                 if team_abbrev not in self.roster_cache:
                     roster = get_team_roster(team_abbrev, season=season)
                     self.roster_cache[team_abbrev] = roster
                 else:
                     roster = self.roster_cache[team_abbrev]
+                
+                if not roster:
+                    ta = team_abbrev
+                    self.after(0, lambda: self._roster_load_error(
+                        f"No roster data returned for {ta}. "
+                        "The NBA API may be temporarily unavailable — try again in a moment."
+                    ))
+                    return
+                
+                # Fetch today's games (cache it)
+                if self.todays_games_cache is None:
+                    try:
+                        games, _, _ = get_todays_games()
+                        self.todays_games_cache = games
+                    except Exception:
+                        self.todays_games_cache = []
                 
                 # Fetch injury report if needed
                 if not self.injury_rows_cache:
@@ -1169,16 +1173,6 @@ class NBAPredictor(tk.Tk):
                     status = row.get_canonical_status() if hasattr(row, 'get_canonical_status') else row.status
                     injury_map[key] = status
                 
-                # Get player impacts for this team
-                impacts = self.player_stats_cache.get(team_abbrev, [])
-                stats_map = {}
-                for impact in impacts:
-                    name_norm = normalize_player_name(impact.player_name)
-                    stats_map[name_norm] = impact
-
-                if not impacts:
-                    print(f"  ⚠ Player stats missing for {team_abbrev}, showing roster without stat enrichment.")
-                
                 # Determine if team plays tonight
                 tonight_game = None
                 if self.todays_games_cache:
@@ -1187,103 +1181,53 @@ class NBAPredictor(tk.Tk):
                             tonight_game = game
                             break
                 
-                # Build tonight summary
                 if tonight_game:
                     if tonight_game.home_team == team_abbrev:
-                        opponent = tonight_game.away_team
-                        tonight_summary = f"Tonight: vs {opponent} (Home)"
+                        tonight_summary = f"Tonight: vs {tonight_game.away_team} (Home)"
                     else:
-                        opponent = tonight_game.home_team
-                        tonight_summary = f"Tonight: @ {opponent} (Away)"
+                        tonight_summary = f"Tonight: @ {tonight_game.home_team} (Away)"
                 else:
                     tonight_summary = "No game today"
                 
-                # Build row data
-                rows = []
-                for player in roster:
-                    name_norm = normalize_player_name(player.player_name)
-                    impact = stats_map.get(name_norm)
-                    
-                    # Get stats
-                    if impact:
-                        mpg = f"{impact.minutes_per_game:.1f}"
-                        ppg = f"{impact.points_per_game:.1f}"
-                        rpg = f"{impact.rebounds_per_game:.1f}"
-                        apg = f"{impact.assists_per_game:.1f}"
-                        fg_pct = f"{impact.fg_pct:.1f}"
-                        fg3_pct = f"{impact.fg3_pct:.1f}"
-                        usg = f"{impact.usage_pct:.1f}"
-                        
-                        # Determine role
-                        if impact.is_star:
-                            role = "Star"
-                        elif impact.is_key_player:
-                            role = "Key"
-                        elif impact.minutes_per_game >= 15:
-                            role = "Rotation"
-                        else:
-                            role = "Bench"
-                    else:
-                        mpg = ppg = rpg = apg = fg_pct = fg3_pct = usg = "--"
-                        role = "Bench"
-                    
-                    # Determine status
-                    injury_key = (team_abbrev, name_norm)
-                    status = injury_map.get(injury_key, "Available")
-                    if status.upper() in ("AVAILABLE", ""):
-                        status = "Available"
-                    
-                    # Determine tonight
-                    if not tonight_game:
-                        tonight = "N/A"
-                    elif status.upper() in ("OUT", "DOUBTFUL"):
-                        tonight = "No"
-                    elif status.upper() == "QUESTIONABLE":
-                        tonight = "Maybe"
-                    else:
-                        tonight = "Yes"
-                    
-                    # Determine tags for highlighting
-                    tags = []
-                    status_upper = status.upper()
-                    if status_upper == "OUT":
-                        tags.append('out')
-                    elif status_upper == "DOUBTFUL":
-                        tags.append('doubtful')
-                    elif status_upper == "QUESTIONABLE":
-                        tags.append('questionable')
-                    elif status_upper == "PROBABLE":
-                        tags.append('probable')
-                    
-                    if impact:
-                        if impact.is_star:
-                            tags.append('star')
-                        elif impact.is_key_player:
-                            tags.append('key')
-                    
-                    row_data = {
-                        'name': player.player_name,
-                        'pos': player.position or "--",
-                        'role': role,
-                        'status': status,
-                        'tonight': tonight,
-                        'mpg': mpg,
-                        'ppg': ppg,
-                        'rpg': rpg,
-                        'apg': apg,
-                        'fg_pct': fg_pct,
-                        'fg3_pct': fg3_pct,
-                        'usg': usg,
-                        'tags': tuple(tags),
-                    }
-                    rows.append(row_data)
+                # Build stats map from whatever is already cached (may be empty)
+                stats_map = {}
+                need_stats_fetch = self.player_stats_cache is None
+                if self.player_stats_cache:
+                    for impact in self.player_stats_cache.get(team_abbrev, []):
+                        stats_map[normalize_player_name(impact.player_name)] = impact
                 
-                # Sort: stars first, then by role, then by name
-                role_order = {'Star': 0, 'Key': 1, 'Rotation': 2, 'Bench': 3}
-                rows.sort(key=lambda r: (role_order.get(r['role'], 4), r['name']))
+                # Render roster immediately with whatever data is available
+                rows = self._build_roster_row_data(
+                    roster, stats_map, injury_map, tonight_game, team_abbrev
+                )
+                ts = tonight_summary
+                self.after(0, lambda: self._render_roster_rows(rows, ts))
                 
-                # Update UI from main thread
-                self.after(0, lambda: self._render_roster_rows(rows, tonight_summary))
+                # ── Phase 2: player-stats enrichment (may be slow) ────
+                if need_stats_fetch:
+                    self.after(0, lambda: self.log("  Loading player stats for enrichment..."))
+                    try:
+                        self.player_stats_cache = get_player_stats(season=season)
+                    except Exception as ps_err:
+                        print(f"  ⚠ Player stats fetch failed: {ps_err}")
+                        self.player_stats_cache = {}
+                    
+                    # Re-render with stats enrichment if we got data
+                    new_impacts = self.player_stats_cache.get(team_abbrev, [])
+                    if new_impacts:
+                        stats_map = {}
+                        for impact in new_impacts:
+                            stats_map[normalize_player_name(impact.player_name)] = impact
+                        rows = self._build_roster_row_data(
+                            roster, stats_map, injury_map, tonight_game, team_abbrev
+                        )
+                        self.after(0, lambda: self._render_roster_rows(rows, ts))
+                        self.after(0, lambda: self.log("  Player stats loaded — roster enriched."))
+                    else:
+                        ta = team_abbrev
+                        self.after(0, lambda: self.log(
+                            f"  ⚠ No player stats for {ta} — roster shown without stat enrichment."
+                        ))
                 
             except Exception as e:
                 import traceback
@@ -1316,6 +1260,97 @@ class NBAPredictor(tk.Tk):
         
         self.log(f"  Loaded {len(rows)} players for {self.roster_team_var.get()}")
     
+    def _build_roster_row_data(self, roster, stats_map, injury_map, tonight_game, team_abbrev):
+        """Build row data dicts for the roster treeview.
+
+        Extracted so it can be called twice: once for an immediate render
+        (possibly without stats) and again after stats arrive.
+        """
+        from ingest.availability import normalize_player_name
+
+        rows = []
+        for player in roster:
+            name_norm = normalize_player_name(player.player_name)
+            impact = stats_map.get(name_norm)
+
+            # Get stats
+            if impact:
+                mpg = f"{impact.minutes_per_game:.1f}"
+                ppg = f"{impact.points_per_game:.1f}"
+                rpg = f"{impact.rebounds_per_game:.1f}"
+                apg = f"{impact.assists_per_game:.1f}"
+                fg_pct = f"{impact.fg_pct:.1f}"
+                fg3_pct = f"{impact.fg3_pct:.1f}"
+                usg = f"{impact.usage_pct:.1f}"
+
+                if impact.is_star:
+                    role = "Star"
+                elif impact.is_key_player:
+                    role = "Key"
+                elif impact.minutes_per_game >= 15:
+                    role = "Rotation"
+                else:
+                    role = "Bench"
+            else:
+                mpg = ppg = rpg = apg = fg_pct = fg3_pct = usg = "--"
+                role = "Bench"
+
+            # Determine status
+            injury_key = (team_abbrev, name_norm)
+            status = injury_map.get(injury_key, "Available")
+            if status.upper() in ("AVAILABLE", ""):
+                status = "Available"
+
+            # Determine tonight
+            if not tonight_game:
+                tonight = "N/A"
+            elif status.upper() in ("OUT", "DOUBTFUL"):
+                tonight = "No"
+            elif status.upper() == "QUESTIONABLE":
+                tonight = "Maybe"
+            else:
+                tonight = "Yes"
+
+            # Determine tags for highlighting
+            tags = []
+            status_upper = status.upper()
+            if status_upper == "OUT":
+                tags.append('out')
+            elif status_upper == "DOUBTFUL":
+                tags.append('doubtful')
+            elif status_upper == "QUESTIONABLE":
+                tags.append('questionable')
+            elif status_upper == "PROBABLE":
+                tags.append('probable')
+
+            if impact:
+                if impact.is_star:
+                    tags.append('star')
+                elif impact.is_key_player:
+                    tags.append('key')
+
+            row_data = {
+                'name': player.player_name,
+                'pos': player.position or "--",
+                'role': role,
+                'status': status,
+                'tonight': tonight,
+                'mpg': mpg,
+                'ppg': ppg,
+                'rpg': rpg,
+                'apg': apg,
+                'fg_pct': fg_pct,
+                'fg3_pct': fg3_pct,
+                'usg': usg,
+                'tags': tuple(tags),
+            }
+            rows.append(row_data)
+
+        # Sort: stars first, then by role, then by name
+        role_order = {'Star': 0, 'Key': 1, 'Rotation': 2, 'Bench': 3}
+        rows.sort(key=lambda r: (role_order.get(r['role'], 4), r['name']))
+        return rows
+
     def _roster_load_error(self, error_msg: str):
         """Handle roster load error with popup notification."""
         self.roster_loading = False
@@ -1654,9 +1689,13 @@ class NBAPredictor(tk.Tk):
                 
                 self.after(0, lambda: self._update_proj_game_dropdown(game_displays))
                 
-                # Ensure player stats cache exists
+                # Ensure player stats cache exists (non-fatal if it fails)
                 if self.player_stats_cache is None:
-                    self.player_stats_cache = get_player_stats(season=season)
+                    try:
+                        self.player_stats_cache = get_player_stats(season=season)
+                    except Exception as ps_err:
+                        print(f"  ⚠ Player stats fetch failed: {ps_err}")
+                        self.player_stats_cache = {}
                 
                 # Ensure team stats cache exists
                 if self.team_stats_cache is None:
