@@ -170,7 +170,7 @@ def main() -> int:
     
     # Step 1: Get today's games
     print("[1/7] Fetching today's games...")
-    games = get_todays_games()
+    games, api_date, is_current = get_todays_games()
     
     if not games:
         print("  No games scheduled for today.")

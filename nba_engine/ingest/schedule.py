@@ -22,6 +22,20 @@ class Game:
     home_team: str
     start_time_utc: Optional[str] = None
 
+    @property
+    def start_time_et(self) -> str:
+        """Return start time converted to Eastern Time, or 'TBD'."""
+        if not self.start_time_utc:
+            return "TBD"
+        try:
+            utc_dt = datetime.fromisoformat(self.start_time_utc.replace("Z", "+00:00"))
+            month = utc_dt.month
+            offset = timedelta(hours=-4) if 3 <= month <= 11 else timedelta(hours=-5)
+            et_dt = utc_dt + offset
+            return et_dt.strftime("%I:%M %p ET")
+        except Exception:
+            return self.start_time_utc
+
 
 def get_eastern_date() -> str:
     """

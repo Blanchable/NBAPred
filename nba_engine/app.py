@@ -465,7 +465,7 @@ class NBAPredictor(tk.Tk):
             
             # Get games
             self.log("\n[2/7] Fetching today's games...")
-            games = get_todays_games()
+            games, _api_date, _is_current = get_todays_games()
             
             if not games:
                 self.log("  No games scheduled for today")

@@ -41,14 +41,14 @@ def main():
     print("-" * 80)
     print("STEP 1: TODAY'S GAMES")
     print("-" * 80)
-    games = get_todays_games()
+    games, _api_date, _is_current = get_todays_games()
     
     if not games:
         print("No games found for today.")
         return
     
     for game in games:
-        print(f"  {game.away_team} @ {game.home_team} - {game.start_time_utc or 'TBD'}")
+        print(f"  {game.away_team} @ {game.home_team} - {game.start_time_et}")
     print()
     
     # Step 2: Team Stats
