@@ -15,9 +15,18 @@ Total weights sum to 100.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import exp
+from math import exp, tanh
 from typing import Any, Optional
 import re
+import copy
+import os
+
+from .factor_debug import (
+    DEBUG_FACTORS, DataSource, FactorDebugInfo, StatsWithProvenance,
+    add_debug_info, clear_debug_info, validate_distinct_stats,
+    ensure_distinct_copies, get_debug_summary,
+)
+from .totals_prediction import predict_game_totals, TotalsPrediction
 
 
 # ============================================================================
@@ -25,28 +34,30 @@ import re
 # ============================================================================
 
 # Factor weights (must sum to 100)
-# V3: Updated with home/road split replacing generic home court
+# V3.2: Simplified to reduce double counting and improve interpretability
+# - Merged shot_quality + three_point_edge into shooting_advantage
+# - Replaced free_throw_rate with free_throw_differential
+# - Reduced defense and bench weights to avoid overlap with net rating
 FACTOR_WEIGHTS = {
-    "lineup_net_rating": 14,     # Lineup-adjusted net rating
-    "star_impact": 9,            # Tiered star availability (replaces old star_availability)
-    "rotation_replacement": 4,   # Next-man-up quality when star is out
-    "off_vs_def": 8,             # Offensive vs defensive matchup
+    "lineup_net_rating": 18,     # Primary team strength signal (softcapped)
+    "star_impact": 7,            # Injury awareness
+    "rotation_replacement": 5,   # Next-man-up quality
+    "off_vs_def": 12,            # Matchup efficiency
     "turnover_diff": 6,          # Ball security
-    "shot_quality": 6,           # eFG% advantage
-    "three_point_edge": 6,       # 3P shooting edge
-    "free_throw_rate": 5,        # Getting to the line
-    "rebounding": 5,             # Board control
-    "home_road_split": 5,        # Home/road performance (NEW)
-    "home_court": 4,             # Basic home advantage (reduced)
+    "shooting_advantage": 8,     # Combined eFG + 3P (replaces shot_quality + three_point_edge)
+    "free_throw_diff": 4,        # FT rate differential (replaces free_throw_rate)
+    "rebounding": 6,             # Board control
+    "home_road_split": 3,        # Home/road performance split
+    "home_court": 4,             # Basic home advantage
     "rest_fatigue": 5,           # Rest days
-    "rim_protection": 4,         # Interior defense
-    "perimeter_defense": 4,      # Perimeter D
-    "matchup_fit": 3,            # Style matchup (Four Factors)
-    "bench_depth": 4,            # Rotation quality
-    "pace_control": 3,           # Tempo
+    "rim_protection": 3,         # Interior defense (reduced to avoid overlap)
+    "perimeter_defense": 2,      # Perimeter D (reduced to avoid overlap)
+    "matchup_fit": 4,            # Style matchups
+    "bench_depth": 3,            # Rotation quality (reduced to avoid net rating overlap)
+    "pace_control": 2,           # Tempo advantage
     "late_game_creation": 3,     # Clutch proxy
+    "variance_signal": 5,        # 3P reliance (affects confidence)
     "coaching": 0,               # Neutral (no data)
-    "shooting_variance": 2,      # 3P reliance (affects confidence)
     "motivation": 0,             # Neutral (no data)
 }
 
@@ -61,9 +72,8 @@ FACTOR_NAMES = {
     "rotation_replacement": "Rotation Replacement",
     "off_vs_def": "Off vs Def Efficiency",
     "turnover_diff": "Turnover Differential",
-    "shot_quality": "Shot Quality",
-    "three_point_edge": "3P Edge",
-    "free_throw_rate": "Free Throw Rate",
+    "shooting_advantage": "Shooting Advantage",
+    "free_throw_diff": "Free Throw Differential",
     "rebounding": "Rebounding",
     "home_road_split": "Home/Road Split",
     "home_court": "Home Court",
@@ -74,8 +84,8 @@ FACTOR_NAMES = {
     "bench_depth": "Bench Depth",
     "pace_control": "Pace Control",
     "late_game_creation": "Late Game Creation",
+    "variance_signal": "Variance Signal",
     "coaching": "Coaching",
-    "shooting_variance": "Shooting Variance",
     "motivation": "Motivation",
 }
 
@@ -84,9 +94,8 @@ SCALES = {
     "net_rating": 10.0,
     "off_vs_def": 10.0,
     "turnover": 4.0,
-    "shot_quality": 6.0,
-    "three_point": 6.0,
-    "ft_rate": 0.08,
+    "shooting": 0.06,       # Combined eFG + 3P scale (6% diff ~= max)
+    "ftr": 0.12,            # FT rate differential scale
     "rebounding": 6.0,
     "home_road": 8.0,
     "pace": 6.0,
@@ -101,13 +110,19 @@ SCALES = {
 # Edge scores typically range 15-30, we want margins 3-7
 EDGE_TO_MARGIN = 4.5
 
-# Margin to probability scale
-# margin 0 -> 50%, margin 3 -> ~60%, margin 5 -> ~67%, margin 10 -> ~80%
-MARGIN_PROB_SCALE = 7.0
+# Margin to probability scale (flattened to reduce overconfidence)
+# margin 0 -> 50%, margin 5 -> ~64%, margin 10 -> ~76%
+MARGIN_PROB_SCALE = 8.8
 
-# Probability clamps to prevent overconfidence
+# Probability clamps to prevent overconfidence (tightened)
 PROB_MIN = 0.05
-PROB_MAX = 0.95
+PROB_MAX = 0.93
+
+# Confidence bucket thresholds (raised to reduce overconfidence)
+# These define the boundaries for HIGH / MEDIUM / LOW confidence labels
+# HIGH also requires multi-signal confirmation (see GameScore.strong_signal_count)
+CONF_HIGH_MIN = 72.0   # confidence_pct >= 72.0 AND multi-signal -> HIGH
+CONF_MED_MIN = 60.0    # confidence_pct >= 60.0 -> MEDIUM, else LOW
 
 
 # ============================================================================
@@ -123,6 +138,11 @@ class FactorResult:
     signed_value: float  # [-1, +1]
     contribution: float  # weight * signed_value
     inputs_used: str  # Description of inputs
+    # New fields for provenance tracking
+    home_raw: float = 0.0
+    away_raw: float = 0.0
+    home_fallback: bool = False
+    away_fallback: bool = False
 
 
 @dataclass
@@ -140,28 +160,111 @@ class GameScore:
     away_power_rating: float = 0.0
     factors: list[FactorResult] = field(default_factory=list)
     
+    # Totals prediction fields
+    expected_possessions: float = 0.0
+    ppp_home: float = 0.0
+    ppp_away: float = 0.0
+    predicted_home_points: float = 0.0
+    predicted_away_points: float = 0.0
+    predicted_total: float = 0.0
+    total_range_low: float = 0.0
+    total_range_high: float = 0.0
+    variance_score: float = 0.0
+    totals_band_width: int = 12
+    
     @property
     def pick_prob(self) -> float:
         """Get win probability of the predicted winner."""
         return self.confidence  # confidence IS the pick probability now
     
     @property
+    def confidence_pct_value(self) -> float:
+        """Get confidence as percentage float (0.0-100.0)."""
+        return round(self.confidence * 100, 1)
+    
+    @property
     def confidence_pct(self) -> str:
         """Get confidence as percentage string."""
-        return f"{self.confidence * 100:.0f}%"
+        return f"{self.confidence_pct_value:.1f}%"
+    
+    def strong_signal_count(self) -> int:
+        """
+        Count strong independent signals supporting the pick.
+        
+        Excludes lineup_net_rating, home_road_split, and home_court to avoid
+        labeling games HIGH off a single dominant source.
+        
+        Returns:
+            Number of strong (signed_value >= 0.35) independent signals
+        """
+        factor_map = {f.name: f for f in self.factors}
+        
+        def is_strong(name: str, thresh: float = 0.35) -> bool:
+            f = factor_map.get(name)
+            return (f is not None) and (f.signed_value >= thresh)
+        
+        count = 0
+        
+        # Efficiency, ball security
+        if is_strong("off_vs_def"):
+            count += 1
+        if is_strong("turnover_diff"):
+            count += 1
+        
+        # Shooting advantage (combined signal)
+        if is_strong("shooting_advantage"):
+            count += 1
+        
+        # Defense signals
+        if is_strong("rim_protection"):
+            count += 1
+        if is_strong("perimeter_defense"):
+            count += 1
+        
+        # Rebounding and bench stability
+        if is_strong("rebounding"):
+            count += 1
+        if is_strong("bench_depth"):
+            count += 1
+        
+        return count
+    
+    @property
+    def confidence_bucket(self) -> str:
+        """
+        Get confidence bucket label (HIGH / MEDIUM / LOW).
+        
+        HIGH requires both:
+        1. confidence_pct >= CONF_HIGH_MIN (72%)
+        2. At least 2 strong independent signals (multi-signal confirmation)
+        
+        This prevents HIGH labels driven mostly by net rating + home stacking.
+        """
+        pct = self.confidence_pct_value
+        
+        if pct >= CONF_HIGH_MIN:
+            # Require multi-signal confirmation for HIGH
+            if self.strong_signal_count() >= 2:
+                return "HIGH"
+            # Downgrade to MEDIUM if insufficient signal confirmation
+            return "MEDIUM"
+        elif pct >= CONF_MED_MIN:
+            return "MEDIUM"
+        else:
+            return "LOW"
     
     @property
     def confidence_label(self) -> str:
         """
         Get confidence category label (for UI tagging).
-        Based on win probability thresholds.
+        Based on configurable thresholds. Returns lowercase for CSS/tag usage.
         """
-        if self.confidence >= 0.65:
-            return "high"
-        elif self.confidence >= 0.55:
-            return "medium"
-        else:
-            return "low"
+        return self.confidence_bucket.lower()
+    
+    @property
+    def confidence_display(self) -> str:
+        """Get formatted confidence display: '71.3% (HIGH)'."""
+        return f"{self.confidence_pct} ({self.confidence_bucket})"
     
     @property
     def top_5_factors_str(self) -> str:
@@ -179,6 +282,37 @@ class GameScore:
                 parts.append(f"{f.display_name}:{sign}{f.contribution:.1f}")
         
         return ", ".join(parts) if parts else "No factors"
+    
+    # Totals display properties
+    @property
+    def display_home_points(self) -> int:
+        """Rounded home points for display."""
+        return round(self.predicted_home_points)
+    
+    @property
+    def display_away_points(self) -> int:
+        """Rounded away points for display."""
+        return round(self.predicted_away_points)
+    
+    @property
+    def display_total(self) -> int:
+        """Rounded total for display (ensures sum consistency)."""
+        return self.display_home_points + self.display_away_points
+    
+    @property
+    def display_predicted_score(self) -> str:
+        """Formatted predicted score string: 'AWAY 108 - HOME 114'."""
+        return f"{self.away_team} {self.display_away_points} - {self.home_team} {self.display_home_points}"
+    
+    @property
+    def display_total_range(self) -> str:
+        """Formatted total range string: '210-234'."""
+        return f"{round(self.total_range_low)}-{round(self.total_range_high)}"
+    
+    @property
+    def display_total_with_range(self) -> str:
+        """Formatted total with range: '222 (210-234)'."""
+        return f"{self.display_total} ({self.display_total_range})"
 
 
 # ============================================================================
@@ -237,6 +371,29 @@ def clamp(value: float, min_val: float = -1.0, max_val: float = 1.0) -> float:
     return max(min_val, min(max_val, value))
 
 
+# Softcap scales (prevents saturation at exactly +/-1.0)
+# These values make typical deltas land around 0.2-0.7, not 1.0
+NET_RATING_SOFTCAP = 12.0
+HOME_ROAD_SOFTCAP = 10.0
+
+
+def softcap_tanh(value: float, scale: float) -> float:
+    """
+    Smoothly compress value to (-1, 1) without hard clipping.
+    Prevents frequent saturation at exactly +/-1.0.
+    
+    Args:
+        value: The raw delta value to compress
+        scale: The scale factor (larger = more gradual compression)
+    
+    Returns:
+        Compressed value in range (-1, 1)
+    """
+    if scale <= 0:
+        return clamp(value)
+    return tanh(value / scale)
+
+
 def safe_get(stats: dict, key: str, default: float = 0.0) -> float:
     """Safely get a numeric value from stats dict."""
     val = stats.get(key, default)
@@ -246,6 +403,34 @@ def safe_get(stats: dict, key: str, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def safe_get_with_fallback(
+    stats: dict, 
+    key: str, 
+    default: float,
+    team: str = "",
+) -> tuple[float, bool, str]:
+    """
+    Safely get a numeric value from stats dict, tracking if fallback was used.
+    
+    Returns:
+        Tuple of (value, fallback_used, source_description)
+    """
+    val = stats.get(key)
+    
+    if val is None:
+        return default, True, f"fallback({default})"
+    
+    try:
+        float_val = float(val)
+        # Check if value looks like a default/fallback (exact match to common defaults)
+        common_defaults = {0.52, 0.36, 0.40, 0.25, 14.0, 25.0, 100.0, 110.0}
+        is_likely_default = float_val in common_defaults
+        source = "api" if not is_likely_default else f"api({float_val})"
+        return float_val, False, source
+    except (ValueError, TypeError):
+        return default, True, f"fallback({default})"
 
 
 def edge_to_margin(edge_score: float, scale: float = EDGE_TO_MARGIN) -> float:
@@ -328,11 +513,14 @@ def calc_lineup_net_rating(
     away_adjusted_net: float,
 ) -> FactorResult:
     """
-    Factor 1: Lineup-Adjusted Net Rating (14 points)
+    Factor 1: Lineup-Adjusted Net Rating
     Uses lineup-adjusted ratings that account for injuries.
+    
+    Uses softcap_tanh to prevent saturation at exactly +/-1.0.
     """
     delta = home_adjusted_net - away_adjusted_net
-    signed_value = clamp(delta / SCALES["net_rating"])
+    # Use softcap instead of hard clamp to prevent saturation
+    signed_value = softcap_tanh(delta, NET_RATING_SOFTCAP)
     
     return FactorResult(
         name="lineup_net_rating",
@@ -487,10 +675,19 @@ def calc_off_vs_def(
 def calc_turnover_diff(
     home_tov_pct: float,
     away_tov_pct: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 4: Turnover Differential (7 points)"""
     delta = away_tov_pct - home_tov_pct  # Lower is better
     signed_value = clamp(delta / SCALES["turnover"])
+    
+    home_str = f"HomeTOV%:{home_tov_pct:.1f}"
+    away_str = f"AwayTOV%:{away_tov_pct:.1f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="turnover_diff",
@@ -498,75 +695,109 @@ def calc_turnover_diff(
         weight=FACTOR_WEIGHTS["turnover_diff"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["turnover_diff"] * signed_value,
-        inputs_used=f"HomeTOV%:{home_tov_pct:.1f} AwayTOV%:{away_tov_pct:.1f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_tov_pct,
+        away_raw=away_tov_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
-def calc_shot_quality(
+def calc_shooting_advantage(
     home_efg: float,
     away_efg: float,
-) -> FactorResult:
-    """Factor 5: Shot Quality (7 points)"""
-    delta = (home_efg - away_efg) * 100
-    signed_value = clamp(delta / SCALES["shot_quality"])
-    
-    return FactorResult(
-        name="shot_quality",
-        display_name=FACTOR_NAMES["shot_quality"],
-        weight=FACTOR_WEIGHTS["shot_quality"],
-        signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["shot_quality"] * signed_value,
-        inputs_used=f"HomeEFG:{home_efg:.1%} AwayEFG:{away_efg:.1%}",
-    )
-
-
-def calc_three_point_edge(
     home_fg3_pct: float,
-    home_fg3a_rate: float,
     away_fg3_pct: float,
-    away_fg3a_rate: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
-    """Factor 6: 3P Volume and Accuracy (7 points)"""
-    home_score = home_fg3_pct * 100 + home_fg3a_rate * 20
-    away_score = away_fg3_pct * 100 + away_fg3a_rate * 20
-    delta = home_score - away_score
-    signed_value = clamp(delta / SCALES["three_point"])
+    """
+    Factor: Shooting Advantage (combined eFG + 3P)
+    
+    Merges shot_quality and three_point_edge to reduce double counting.
+    Weights eFG more heavily (0.7) as it's the more comprehensive measure.
+    """
+    efg_delta = home_efg - away_efg
+    three_delta = home_fg3_pct - away_fg3_pct
+    
+    # Combined shooting advantage (70% eFG, 30% 3P)
+    combined = (0.7 * efg_delta) + (0.3 * three_delta)
+    signed_value = clamp(combined / SCALES["shooting"])
+    
+    # Build inputs string
+    home_str = f"HomeEFG:{home_efg:.1%} 3P:{home_fg3_pct:.1%}"
+    away_str = f"AwayEFG:{away_efg:.1%} 3P:{away_fg3_pct:.1%}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
-        name="three_point_edge",
-        display_name=FACTOR_NAMES["three_point_edge"],
-        weight=FACTOR_WEIGHTS["three_point_edge"],
+        name="shooting_advantage",
+        display_name=FACTOR_NAMES["shooting_advantage"],
+        weight=FACTOR_WEIGHTS["shooting_advantage"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["three_point_edge"] * signed_value,
-        inputs_used=f"Home3P%:{home_fg3_pct:.1%} Away3P%:{away_fg3_pct:.1%}",
+        contribution=FACTOR_WEIGHTS["shooting_advantage"] * signed_value,
+        inputs_used=f"{home_str} | {away_str}",
+        home_raw=home_efg,
+        away_raw=away_efg,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
-def calc_free_throw_rate(
+def calc_free_throw_diff(
     home_ft_rate: float,
     away_ft_rate: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
-    """Factor 7: Free Throw Rate (6 points)"""
+    """
+    Factor: Free Throw Differential
+    
+    Uses FT rate (FTA/FGA) differential between teams.
+    Positive = home team gets to the line more often.
+    """
     delta = home_ft_rate - away_ft_rate
-    signed_value = clamp(delta / SCALES["ft_rate"])
+    signed_value = clamp(delta / SCALES["ftr"])
+    
+    home_str = f"HomeFTr:{home_ft_rate:.3f}"
+    away_str = f"AwayFTr:{away_ft_rate:.3f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
-        name="free_throw_rate",
-        display_name=FACTOR_NAMES["free_throw_rate"],
-        weight=FACTOR_WEIGHTS["free_throw_rate"],
+        name="free_throw_diff",
+        display_name=FACTOR_NAMES["free_throw_diff"],
+        weight=FACTOR_WEIGHTS["free_throw_diff"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["free_throw_rate"] * signed_value,
-        inputs_used=f"HomeFTr:{home_ft_rate:.3f} AwayFTr:{away_ft_rate:.3f}",
+        contribution=FACTOR_WEIGHTS["free_throw_diff"] * signed_value,
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_ft_rate,
+        away_raw=away_ft_rate,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
 def calc_rebounding(
     home_oreb_pct: float,
     away_oreb_pct: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 8: Rebounding Edge (6 points)"""
     delta = home_oreb_pct - away_oreb_pct
     signed_value = clamp(delta / SCALES["rebounding"])
+    
+    home_str = f"HomeOREB%:{home_oreb_pct:.1f}"
+    away_str = f"AwayOREB%:{away_oreb_pct:.1f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="rebounding",
@@ -574,7 +805,11 @@ def calc_rebounding(
         weight=FACTOR_WEIGHTS["rebounding"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["rebounding"] * signed_value,
-        inputs_used=f"HomeOREB%:{home_oreb_pct:.1f} AwayOREB%:{away_oreb_pct:.1f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_oreb_pct,
+        away_raw=away_oreb_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -583,11 +818,17 @@ def calc_home_road_split(
     away_road_net: float,
 ) -> FactorResult:
     """
-    Factor 9: Home/Road Performance Split (5 points) - NEW in v3
+    Factor 9: Home/Road Performance Split
     Uses actual home/road performance splits.
+    
+    Uses softcap_tanh to prevent saturation, and applies a 0.75 stacking gate
+    to reduce double counting with home_court factor.
     """
     delta = home_home_net - away_road_net
-    signed_value = clamp(delta / SCALES["home_road"])
+    # Use softcap instead of hard clamp to prevent saturation
+    signed_value = softcap_tanh(delta, HOME_ROAD_SOFTCAP)
+    # Apply stacking gate to reduce double counting with home_court
+    signed_value *= 0.75
     
     return FactorResult(
         name="home_road_split",
@@ -650,10 +891,19 @@ def calc_rim_protection(
 def calc_perimeter_defense(
     home_opp_fg3_pct: float,
     away_opp_fg3_pct: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 13: Perimeter Defense (4 points)"""
     delta = (away_opp_fg3_pct - home_opp_fg3_pct) * 100  # Lower is better
     signed_value = clamp(delta / SCALES["perimeter"])
+    
+    home_str = f"HomeOpp3P%:{home_opp_fg3_pct:.1%}"
+    away_str = f"AwayOpp3P%:{away_opp_fg3_pct:.1%}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="perimeter_defense",
@@ -661,7 +911,11 @@ def calc_perimeter_defense(
         weight=FACTOR_WEIGHTS["perimeter_defense"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["perimeter_defense"] * signed_value,
-        inputs_used=f"HomeOpp3P%:{home_opp_fg3_pct:.1%} AwayOpp3P%:{away_opp_fg3_pct:.1%}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_opp_fg3_pct,
+        away_raw=away_opp_fg3_pct,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -708,10 +962,19 @@ def calc_bench_depth(
 def calc_pace_control(
     home_pace: float,
     away_pace: float,
+    home_fallback: bool = False,
+    away_fallback: bool = False,
 ) -> FactorResult:
     """Factor 16: Pace Control (3 points)"""
     delta = home_pace - away_pace
     signed_value = clamp(delta / SCALES["pace"])
+    
+    home_str = f"HomePace:{home_pace:.1f}"
+    away_str = f"AwayPace:{away_pace:.1f}"
+    if home_fallback:
+        home_str += " [FB]"
+    if away_fallback:
+        away_str += " [FB]"
     
     return FactorResult(
         name="pace_control",
@@ -719,7 +982,11 @@ def calc_pace_control(
         weight=FACTOR_WEIGHTS["pace_control"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["pace_control"] * signed_value,
-        inputs_used=f"HomePace:{home_pace:.1f} AwayPace:{away_pace:.1f}",
+        inputs_used=f"{home_str} {away_str}",
+        home_raw=home_pace,
+        away_raw=away_pace,
+        home_fallback=home_fallback,
+        away_fallback=away_fallback,
     )
 
 
@@ -753,20 +1020,24 @@ def calc_coaching() -> FactorResult:
     )
 
 
-def calc_shooting_variance(
+def calc_variance_signal(
     home_fg3a_rate: float,
     away_fg3a_rate: float,
 ) -> FactorResult:
-    """Factor 19: Shooting Variance (2 points)"""
+    """
+    Factor: Variance Signal
+    
+    Measures 3P reliance differential. Less 3P reliance = more stable outcomes.
+    """
     delta = away_fg3a_rate - home_fg3a_rate  # Less 3P reliance = more stable
     signed_value = clamp(delta / 0.10)
     
     return FactorResult(
-        name="shooting_variance",
-        display_name=FACTOR_NAMES["shooting_variance"],
-        weight=FACTOR_WEIGHTS["shooting_variance"],
+        name="variance_signal",
+        display_name=FACTOR_NAMES["variance_signal"],
+        weight=FACTOR_WEIGHTS["variance_signal"],
         signed_value=signed_value,
-        contribution=FACTOR_WEIGHTS["shooting_variance"] * signed_value,
+        contribution=FACTOR_WEIGHTS["variance_signal"] * signed_value,
         inputs_used=f"Home3PAr:{home_fg3a_rate:.1%} Away3PAr:{away_fg3a_rate:.1%}",
     )
 
@@ -807,6 +1078,16 @@ def score_game_v3(
     This version uses lineup-adjusted strengths, home/road splits,
     and the new tiered star impact system.
     """
+    # CRITICAL: Ensure home_stats and away_stats are distinct objects
+    # This prevents shared reference bugs
+    home_stats, away_stats = ensure_distinct_copies(home_stats, away_stats)
+    
+    # Validate stats are distinct (log warnings if issues found)
+    if DEBUG_FACTORS:
+        warnings = validate_distinct_stats(home_team, away_team, home_stats, away_stats)
+        for w in warnings:
+            print(f"  [STATS_VALIDATION] {w}")
+    
     # Extract strength values
     if hasattr(home_strength, 'adjusted_net_rating'):
         home_adj_net = home_strength.adjusted_net_rating
@@ -830,14 +1111,49 @@ def score_game_v3(
         away_missing = []
         away_confidence_penalty = 0.0
     
-    # Get stats
-    home_off = safe_get(home_stats, 'off_rating', 110)
-    home_def = safe_get(home_stats, 'def_rating', 110)
-    away_off = safe_get(away_stats, 'off_rating', 110)
-    away_def = safe_get(away_stats, 'def_rating', 110)
+    # Get stats with fallback tracking
+    home_off, home_off_fb, _ = safe_get_with_fallback(home_stats, 'off_rating', 110, home_team)
+    home_def, home_def_fb, _ = safe_get_with_fallback(home_stats, 'def_rating', 110, home_team)
+    away_off, away_off_fb, _ = safe_get_with_fallback(away_stats, 'off_rating', 110, away_team)
+    away_def, away_def_fb, _ = safe_get_with_fallback(away_stats, 'def_rating', 110, away_team)
     
     home_home_net = safe_get(home_stats, 'home_net_rating', home_adj_net + 2)
     away_road_net = safe_get(away_stats, 'road_net_rating', away_adj_net - 2)
+    
+    # Get advanced stats with fallback tracking
+    home_tov, home_tov_fb, _ = safe_get_with_fallback(home_stats, 'tov_pct', 14, home_team)
+    away_tov, away_tov_fb, _ = safe_get_with_fallback(away_stats, 'tov_pct', 14, away_team)
+    
+    home_efg, home_efg_fb, _ = safe_get_with_fallback(home_stats, 'efg_pct', 0.52, home_team)
+    away_efg, away_efg_fb, _ = safe_get_with_fallback(away_stats, 'efg_pct', 0.52, away_team)
+    
+    home_fg3, home_fg3_fb, _ = safe_get_with_fallback(home_stats, 'fg3_pct', 0.36, home_team)
+    away_fg3, away_fg3_fb, _ = safe_get_with_fallback(away_stats, 'fg3_pct', 0.36, away_team)
+    
+    home_fg3a_rate, home_fg3a_fb, _ = safe_get_with_fallback(home_stats, 'fg3a_rate', 0.40, home_team)
+    away_fg3a_rate, away_fg3a_fb, _ = safe_get_with_fallback(away_stats, 'fg3a_rate', 0.40, away_team)
+    
+    home_ft_rate, home_ft_fb, _ = safe_get_with_fallback(home_stats, 'ft_rate', 0.25, home_team)
+    away_ft_rate, away_ft_fb, _ = safe_get_with_fallback(away_stats, 'ft_rate', 0.25, away_team)
+    
+    home_oreb, home_oreb_fb, _ = safe_get_with_fallback(home_stats, 'oreb_pct', 25, home_team)
+    away_oreb, away_oreb_fb, _ = safe_get_with_fallback(away_stats, 'oreb_pct', 25, away_team)
+    
+    home_opp_efg, home_opp_efg_fb, _ = safe_get_with_fallback(home_stats, 'opp_efg_pct', 0.52, home_team)
+    away_opp_efg, away_opp_efg_fb, _ = safe_get_with_fallback(away_stats, 'opp_efg_pct', 0.52, away_team)
+    
+    home_pace, home_pace_fb, _ = safe_get_with_fallback(home_stats, 'pace', 100, home_team)
+    away_pace, away_pace_fb, _ = safe_get_with_fallback(away_stats, 'pace', 100, away_team)
+    
+    # Debug logging for data provenance
+    if DEBUG_FACTORS:
+        print(f"\n[FACTOR_DEBUG] Game: {away_team} @ {home_team}")
+        print(f"[FACTOR_DEBUG] home_stats id={id(home_stats)}, away_stats id={id(away_stats)}")
+        print(f"[FACTOR_DEBUG] Stats comparison:")
+        print(f"  efg_pct: home={home_efg:.4f} (fb={home_efg_fb}) away={away_efg:.4f} (fb={away_efg_fb}) diff={home_efg-away_efg:.4f}")
+        print(f"  tov_pct: home={home_tov:.4f} (fb={home_tov_fb}) away={away_tov:.4f} (fb={away_tov_fb}) diff={home_tov-away_tov:.4f}")
+        print(f"  oreb_pct: home={home_oreb:.4f} (fb={home_oreb_fb}) away={away_oreb:.4f} (fb={away_oreb_fb}) diff={home_oreb-away_oreb:.4f}")
+        print(f"  pace: home={home_pace:.4f} (fb={home_pace_fb}) away={away_pace:.4f} (fb={away_pace_fb}) diff={home_pace-away_pace:.4f}")
     
     factors = []
     
@@ -881,33 +1197,48 @@ def score_game_v3(
             inputs_used="INACTIVE (no player data)",
         ))
     factors.append(calc_off_vs_def(home_off, home_def, away_off, away_def))
-    factors.append(calc_turnover_diff(safe_get(home_stats, 'tov_pct', 14), safe_get(away_stats, 'tov_pct', 14)))
-    factors.append(calc_shot_quality(safe_get(home_stats, 'efg_pct', 0.52), safe_get(away_stats, 'efg_pct', 0.52)))
-    factors.append(calc_three_point_edge(
-        safe_get(home_stats, 'fg3_pct', 0.36), safe_get(home_stats, 'fg3a_rate', 0.40),
-        safe_get(away_stats, 'fg3_pct', 0.36), safe_get(away_stats, 'fg3a_rate', 0.40)
+    factors.append(calc_turnover_diff(home_tov, away_tov, home_tov_fb, away_tov_fb))
+    # Combined shooting factor (replaces shot_quality + three_point_edge)
+    factors.append(calc_shooting_advantage(
+        home_efg, away_efg, home_fg3, away_fg3,
+        home_efg_fb or home_fg3_fb, away_efg_fb or away_fg3_fb
     ))
-    factors.append(calc_free_throw_rate(safe_get(home_stats, 'ft_rate', 0.25), safe_get(away_stats, 'ft_rate', 0.25)))
-    factors.append(calc_rebounding(safe_get(home_stats, 'oreb_pct', 25), safe_get(away_stats, 'oreb_pct', 25)))
+    factors.append(calc_free_throw_diff(home_ft_rate, away_ft_rate, home_ft_fb, away_ft_fb))
+    factors.append(calc_rebounding(home_oreb, away_oreb, home_oreb_fb, away_oreb_fb))
     factors.append(calc_home_road_split(home_home_net, away_road_net))
     factors.append(calc_home_court())
     factors.append(calc_rest_fatigue(home_rest_days, away_rest_days))
     factors.append(calc_rim_protection(home_def, away_def))
-    factors.append(calc_perimeter_defense(
-        safe_get(home_stats, 'opp_efg_pct', 0.52), safe_get(away_stats, 'opp_efg_pct', 0.52)
-    ))
+    factors.append(calc_perimeter_defense(home_opp_efg, away_opp_efg, home_opp_efg_fb, away_opp_efg_fb))
     factors.append(calc_matchup_fit(
-        safe_get(home_stats, 'oreb_pct', 25), safe_get(home_stats, 'fg3a_rate', 0.40),
-        safe_get(away_stats, 'oreb_pct', 25), safe_get(away_stats, 'fg3a_rate', 0.40)
+        home_oreb, home_fg3a_rate,
+        away_oreb, away_fg3a_rate
     ))
     factors.append(calc_bench_depth(home_adj_net, away_adj_net))
-    factors.append(calc_pace_control(safe_get(home_stats, 'pace', 100), safe_get(away_stats, 'pace', 100)))
+    factors.append(calc_pace_control(home_pace, away_pace, home_pace_fb, away_pace_fb))
     factors.append(calc_late_game_creation(home_off, away_off))
     factors.append(calc_coaching())
-    factors.append(calc_shooting_variance(
-        safe_get(home_stats, 'fg3a_rate', 0.40), safe_get(away_stats, 'fg3a_rate', 0.40)
-    ))
+    factors.append(calc_variance_signal(home_fg3a_rate, away_fg3a_rate))
     factors.append(calc_motivation())
+    
+    # Debug: Log factor debug info
+    if DEBUG_FACTORS:
+        for f in factors:
+            if hasattr(f, 'home_raw') and f.home_raw != 0:
+                info = FactorDebugInfo(
+                    factor_name=f.name,
+                    home_team=home_team,
+                    away_team=away_team,
+                    home_raw=f.home_raw,
+                    away_raw=f.away_raw,
+                    home_source=DataSource.FALLBACK_LEAGUE_AVG if f.home_fallback else DataSource.API_SEASON,
+                    away_source=DataSource.FALLBACK_LEAGUE_AVG if f.away_fallback else DataSource.API_SEASON,
+                    home_fallback=f.home_fallback,
+                    away_fallback=f.away_fallback,
+                    signed_value=f.signed_value,
+                    contribution=f.contribution,
+                )
+                add_debug_info(info)
     
     # Sum contributions
     edge_score_total = sum(f.contribution for f in factors)
@@ -938,6 +1269,22 @@ def score_game_v3(
     home_power = calculate_power_rating(home_adj_net, home_availability)
     away_power = calculate_power_rating(away_adj_net, away_availability)
     
+    # Calculate totals prediction
+    totals = predict_game_totals(
+        home_team=home_team,
+        away_team=away_team,
+        home_stats=home_stats,
+        away_stats=away_stats,
+        predicted_margin=projected_margin,
+        win_prob=confidence,
+        home_rest_days=home_rest_days,
+        away_rest_days=away_rest_days,
+    )
+    
+    # Log totals fallbacks if in debug mode
+    if DEBUG_FACTORS and totals.fallbacks_used:
+        print(f"  [TOTALS_FALLBACKS] {', '.join(totals.fallbacks_used)}")
+    
     return GameScore(
         away_team=away_team,
         home_team=home_team,
@@ -950,6 +1297,17 @@ def score_game_v3(
         home_power_rating=round(home_power, 1),
         away_power_rating=round(away_power, 1),
         factors=factors,
+        # Totals prediction fields
+        expected_possessions=round(totals.expected_possessions, 1),
+        ppp_home=round(totals.ppp_home, 3),
+        ppp_away=round(totals.ppp_away, 3),
+        predicted_home_points=totals.predicted_home_points,
+        predicted_away_points=totals.predicted_away_points,
+        predicted_total=totals.predicted_total,
+        total_range_low=totals.total_range_low,
+        total_range_high=totals.total_range_high,
+        variance_score=round(totals.variance_score, 2),
+        totals_band_width=totals.band_width,
     )
 
 

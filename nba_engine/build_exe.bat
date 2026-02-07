@@ -29,7 +29,29 @@ if errorlevel 1 (
 echo Building executable... This may take a few minutes.
 echo.
 
-".venv\Scripts\pyinstaller.exe" --onefile --windowed --name "NBA_Predictor" --add-data "ingest;ingest" --add-data "model;model" app.py
+REM Build with hidden imports for nba_api modules that PyInstaller misses
+".venv\Scripts\pyinstaller.exe" ^
+    --onefile ^
+    --windowed ^
+    --name "NBA_Predictor" ^
+    --add-data "ingest;ingest" ^
+    --add-data "model;model" ^
+    --hidden-import nba_api ^
+    --hidden-import nba_api.live ^
+    --hidden-import nba_api.live.nba ^
+    --hidden-import nba_api.live.nba.endpoints ^
+    --hidden-import nba_api.live.nba.endpoints.scoreboard ^
+    --hidden-import nba_api.stats ^
+    --hidden-import nba_api.stats.endpoints ^
+    --hidden-import nba_api.stats.endpoints.leaguedashplayerstats ^
+    --hidden-import nba_api.stats.endpoints.commonteamroster ^
+    --hidden-import nba_api.stats.endpoints.teamdashboardbygeneralsplits ^
+    --hidden-import nba_api.stats.static ^
+    --hidden-import nba_api.stats.static.teams ^
+    --hidden-import nba_api.stats.library ^
+    --hidden-import pdfplumber ^
+    --hidden-import openpyxl ^
+    app.py
 
 if errorlevel 1 (
     echo.
