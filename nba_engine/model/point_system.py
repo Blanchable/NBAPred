@@ -42,23 +42,25 @@ FACTOR_WEIGHTS = {
     "lineup_net_rating": 18,     # Primary team strength signal (softcapped)
     "star_impact": 7,            # Injury awareness
     "rotation_replacement": 5,   # Next-man-up quality
-    "off_vs_def": 12,            # Matchup efficiency
-    "turnover_diff": 6,          # Ball security
-    "shooting_advantage": 8,     # Combined eFG + 3P (replaces shot_quality + three_point_edge)
-    "free_throw_diff": 4,        # FT rate differential (replaces free_throw_rate)
+    "off_vs_def": 16,            # Matchup efficiency  (+4 from retired matchup_fit)
+    "turnover_diff": 9,          # Ball security         (+3 from retired bench_depth)
+    "shooting_advantage": 8,     # Combined eFG + 3P
+    "free_throw_diff": 4,        # FT rate differential
     "rebounding": 6,             # Board control
     "home_road_split": 3,        # Home/road performance split
     "home_court": 4,             # Basic home advantage
     "rest_fatigue": 5,           # Rest days
-    "rim_protection": 3,         # Interior defense (reduced to avoid overlap)
-    "perimeter_defense": 2,      # Perimeter D (reduced to avoid overlap)
-    "matchup_fit": 4,            # Style matchups
-    "bench_depth": 3,            # Rotation quality (reduced to avoid net rating overlap)
+    "rim_protection": 3,         # Interior defense
+    "perimeter_defense": 2,      # Perimeter D
+    "schedule_stress": 3,        # NEW: B2B / 3-in-4 / travel fatigue
     "pace_control": 2,           # Tempo advantage
-    "late_game_creation": 3,     # Clutch proxy
     "variance_signal": 5,        # 3P reliance (affects confidence)
     "coaching": 0,               # Neutral (no data)
     "motivation": 0,             # Neutral (no data)
+    # Retired (kept at 0 for display-only / backward compat)
+    "matchup_fit": 0,
+    "bench_depth": 0,
+    "late_game_creation": 0,
 }
 
 # Verify weights sum to 100
@@ -80,10 +82,11 @@ FACTOR_NAMES = {
     "rest_fatigue": "Rest/Fatigue",
     "rim_protection": "Rim Protection",
     "perimeter_defense": "Perimeter Defense",
-    "matchup_fit": "Matchup Fit",
-    "bench_depth": "Bench Depth",
+    "matchup_fit": "Matchup Fit (retired)",
+    "bench_depth": "Bench Depth (retired)",
     "pace_control": "Pace Control",
-    "late_game_creation": "Late Game Creation",
+    "schedule_stress": "Schedule Stress",
+    "late_game_creation": "Late Game (retired)",
     "variance_signal": "Variance Signal",
     "coaching": "Coaching",
     "motivation": "Motivation",
@@ -104,6 +107,7 @@ SCALES = {
     "rim": 6.0,
     "perimeter": 6.0,
     "availability": 0.25,
+    "schedule_stress": 0.6,  # stress delta ~0.6 normalizes to ±1.0
 }
 
 # Edge score to margin mapping
@@ -159,6 +163,14 @@ class GameScore:
     home_power_rating: float = 0.0  # Team power rating (0-100)
     away_power_rating: float = 0.0
     factors: list[FactorResult] = field(default_factory=list)
+    
+    # Instability metadata (for UI display)
+    instability_home: float = 0.0
+    instability_away: float = 0.0
+    instability_bucket_home: str = "NONE"
+    instability_bucket_away: str = "NONE"
+    recency_weight_home: float = 0.0
+    recency_weight_away: float = 0.0
     
     # Totals prediction fields
     expected_possessions: float = 0.0
@@ -221,10 +233,8 @@ class GameScore:
         if is_strong("perimeter_defense"):
             count += 1
         
-        # Rebounding and bench stability
+        # Rebounding
         if is_strong("rebounding"):
-            count += 1
-        if is_strong("bench_depth"):
             count += 1
         
         return count
@@ -870,6 +880,34 @@ def calc_rest_fatigue(
     )
 
 
+def calc_schedule_stress(
+    home_stress_norm: float,
+    away_stress_norm: float,
+    home_inputs: str = "",
+    away_inputs: str = "",
+) -> FactorResult:
+    """
+    Factor: Schedule Stress (3 points)
+    
+    Captures B2B, 3-in-4, and travel fatigue.  Higher stress on the
+    home side tilts the score toward the away team and vice versa.
+    """
+    # Positive signed_value = home advantage (away more stressed)
+    delta = away_stress_norm - home_stress_norm
+    signed_value = clamp(delta / SCALES["schedule_stress"])
+    
+    inputs = f"Home:{home_stress_norm:.2f} ({home_inputs}) Away:{away_stress_norm:.2f} ({away_inputs})"
+    
+    return FactorResult(
+        name="schedule_stress",
+        display_name=FACTOR_NAMES["schedule_stress"],
+        weight=FACTOR_WEIGHTS["schedule_stress"],
+        signed_value=signed_value,
+        contribution=FACTOR_WEIGHTS["schedule_stress"] * signed_value,
+        inputs_used=inputs,
+    )
+
+
 def calc_rim_protection(
     home_def_rating: float,
     away_def_rating: float,
@@ -1055,6 +1093,26 @@ def calc_motivation() -> FactorResult:
 
 
 # ============================================================================
+# RECENCY BLENDING HELPER
+# ============================================================================
+
+def effective_metric(
+    season_value: float,
+    recent_value: float,
+    w_recent: float,
+) -> float:
+    """
+    Blend a season metric with its recent counterpart.
+
+    If ``recent_value`` is zero (missing / not available), fall back to the
+    full-season value so the model never degrades when data is absent.
+    """
+    if recent_value == 0.0:
+        return season_value
+    return (1.0 - w_recent) * season_value + w_recent * recent_value
+
+
+# ============================================================================
 # MAIN SCORING FUNCTION (V3)
 # ============================================================================
 
@@ -1071,12 +1129,19 @@ def score_game_v3(
     away_players: list = None,
     home_injuries: list = None,
     away_injuries: list = None,
+    instability_home: float = 0.0,
+    instability_away: float = 0.0,
+    home_stress_norm: float = 0.0,
+    away_stress_norm: float = 0.0,
+    home_stress_inputs: str = "",
+    away_stress_inputs: str = "",
 ) -> GameScore:
     """
     Score a game using the v3 20-factor weighted point system.
     
     This version uses lineup-adjusted strengths, home/road splits,
-    and the new tiered star impact system.
+    the tiered star impact system, recency blending, and roster-
+    instability modifiers.
     """
     # CRITICAL: Ensure home_stats and away_stats are distinct objects
     # This prevents shared reference bugs
@@ -1145,11 +1210,59 @@ def score_game_v3(
     home_pace, home_pace_fb, _ = safe_get_with_fallback(home_stats, 'pace', 100, home_team)
     away_pace, away_pace_fb, _ = safe_get_with_fallback(away_stats, 'pace', 100, away_team)
     
+    # ── Recency blending ────────────────────────────────────────────
+    # Compute per-team recency weights based on roster instability.
+    from services.instability import (
+        instability_to_recency_weight,
+        instability_netrating_mult,
+        instability_conf_mult,
+        instability_score_penalty,
+        instability_bucket,
+    )
+
+    w_recent_home = instability_to_recency_weight(instability_home)
+    w_recent_away = instability_to_recency_weight(instability_away)
+
+    home_recent_off = safe_get(home_stats, 'recent_off_rating', 0)
+    home_recent_def = safe_get(home_stats, 'recent_def_rating', 0)
+    home_recent_net = safe_get(home_stats, 'recent_net_rating', 0)
+    home_recent_pace = safe_get(home_stats, 'recent_pace', 0)
+
+    away_recent_off = safe_get(away_stats, 'recent_off_rating', 0)
+    away_recent_def = safe_get(away_stats, 'recent_def_rating', 0)
+    away_recent_net = safe_get(away_stats, 'recent_net_rating', 0)
+    away_recent_pace = safe_get(away_stats, 'recent_pace', 0)
+
+    # Blend season values with recent values
+    home_off = effective_metric(home_off, home_recent_off, w_recent_home)
+    home_def = effective_metric(home_def, home_recent_def, w_recent_home)
+    away_off = effective_metric(away_off, away_recent_off, w_recent_away)
+    away_def = effective_metric(away_def, away_recent_def, w_recent_away)
+
+    home_pace = effective_metric(home_pace, home_recent_pace, w_recent_home)
+    away_pace = effective_metric(away_pace, away_recent_pace, w_recent_away)
+
+    # Also blend the lineup-adjusted net rating with recent net rating
+    home_adj_net = effective_metric(home_adj_net, home_recent_net, w_recent_home)
+    away_adj_net = effective_metric(away_adj_net, away_recent_net, w_recent_away)
+
+    # ── Net-rating instability dampening ──────────────────────────
+    # Reduce net-rating dominance for the favored side when instability
+    # is elevated (stale / shifted data shouldn't drive big edges).
+    net_delta_raw = home_adj_net - away_adj_net
+    if net_delta_raw > 0:
+        net_mult = instability_netrating_mult(instability_home)
+    else:
+        net_mult = instability_netrating_mult(instability_away)
+
     # Debug logging for data provenance
     if DEBUG_FACTORS:
         print(f"\n[FACTOR_DEBUG] Game: {away_team} @ {home_team}")
         print(f"[FACTOR_DEBUG] home_stats id={id(home_stats)}, away_stats id={id(away_stats)}")
-        print(f"[FACTOR_DEBUG] Stats comparison:")
+        print(f"[FACTOR_DEBUG] Instability: home={instability_home:.3f} ({instability_bucket(instability_home)}) "
+              f"away={instability_away:.3f} ({instability_bucket(instability_away)})")
+        print(f"[FACTOR_DEBUG] Recency weights: home={w_recent_home:.2f} away={w_recent_away:.2f}")
+        print(f"[FACTOR_DEBUG] Stats comparison (after blending):")
         print(f"  efg_pct: home={home_efg:.4f} (fb={home_efg_fb}) away={away_efg:.4f} (fb={away_efg_fb}) diff={home_efg-away_efg:.4f}")
         print(f"  tov_pct: home={home_tov:.4f} (fb={home_tov_fb}) away={away_tov:.4f} (fb={away_tov_fb}) diff={home_tov-away_tov:.4f}")
         print(f"  oreb_pct: home={home_oreb:.4f} (fb={home_oreb_fb}) away={away_oreb:.4f} (fb={away_oreb_fb}) diff={home_oreb-away_oreb:.4f}")
@@ -1158,7 +1271,10 @@ def score_game_v3(
     factors = []
     
     # Calculate all factors
-    factors.append(calc_lineup_net_rating(home_adj_net, away_adj_net))
+    # Apply net-rating instability dampener to the lineup net rating factor
+    home_adj_net_damped = home_adj_net * net_mult if net_delta_raw > 0 else home_adj_net
+    away_adj_net_damped = away_adj_net * net_mult if net_delta_raw <= 0 else away_adj_net
+    factors.append(calc_lineup_net_rating(home_adj_net_damped, away_adj_net_damped))
     
     # Star Impact and Rotation Replacement (new tiered system)
     if home_players and away_players:
@@ -1210,16 +1326,30 @@ def score_game_v3(
     factors.append(calc_rest_fatigue(home_rest_days, away_rest_days))
     factors.append(calc_rim_protection(home_def, away_def))
     factors.append(calc_perimeter_defense(home_opp_efg, away_opp_efg, home_opp_efg_fb, away_opp_efg_fb))
-    factors.append(calc_matchup_fit(
-        home_oreb, home_fg3a_rate,
-        away_oreb, away_fg3a_rate
+    factors.append(calc_schedule_stress(
+        home_stress_norm, away_stress_norm,
+        home_stress_inputs, away_stress_inputs,
     ))
-    factors.append(calc_bench_depth(home_adj_net, away_adj_net))
     factors.append(calc_pace_control(home_pace, away_pace, home_pace_fb, away_pace_fb))
-    factors.append(calc_late_game_creation(home_off, away_off))
-    factors.append(calc_coaching())
     factors.append(calc_variance_signal(home_fg3a_rate, away_fg3a_rate))
+    factors.append(calc_coaching())
     factors.append(calc_motivation())
+    # Retired factors (0 weight, info-only rows)
+    factors.append(FactorResult(
+        name="matchup_fit", display_name=FACTOR_NAMES["matchup_fit"],
+        weight=0, signed_value=0.0, contribution=0.0,
+        inputs_used="Retired (weight redistributed to off_vs_def)",
+    ))
+    factors.append(FactorResult(
+        name="bench_depth", display_name=FACTOR_NAMES["bench_depth"],
+        weight=0, signed_value=0.0, contribution=0.0,
+        inputs_used="Retired (weight redistributed to turnover_diff)",
+    ))
+    factors.append(FactorResult(
+        name="late_game_creation", display_name=FACTOR_NAMES["late_game_creation"],
+        weight=0, signed_value=0.0, contribution=0.0,
+        inputs_used="Retired (weight redistributed to schedule_stress)",
+    ))
     
     # Debug: Log factor debug info
     if DEBUG_FACTORS:
@@ -1255,6 +1385,22 @@ def score_game_v3(
     if abs(projected_margin) < 6 and home_win_prob > 0.85:
         print(f"  Warning: margin={projected_margin:.1f} but prob={home_win_prob:.1%} - check calibration")
     
+    # ── Instability confidence compression ──────────────────────────
+    # Compress confidence toward 50 % when either team is unstable,
+    # preventing "false locks" on games with heavy roster churn.
+    worst_instability = max(instability_home, instability_away)
+    conf_mult = instability_conf_mult(worst_instability)
+
+    # Apply compression to the win-probability spread (preserves 50 % midpoint)
+    home_win_prob = 0.5 + (home_win_prob - 0.5) * conf_mult
+    away_win_prob = 1.0 - home_win_prob
+
+    # ── Schedule stress confidence compression (~5 % at max) ─────
+    worst_stress = max(home_stress_norm, away_stress_norm)
+    stress_conf_mult = 1.0 - 0.05 * worst_stress
+    home_win_prob = 0.5 + (home_win_prob - 0.5) * stress_conf_mult
+    away_win_prob = 1.0 - home_win_prob
+
     # Determine predicted winner using EDGE (not probability!)
     # Confidence is the win probability of the chosen pick
     predicted_winner, confidence = decide_pick(
@@ -1297,6 +1443,13 @@ def score_game_v3(
         home_power_rating=round(home_power, 1),
         away_power_rating=round(away_power, 1),
         factors=factors,
+        # Instability metadata
+        instability_home=round(instability_home, 3),
+        instability_away=round(instability_away, 3),
+        instability_bucket_home=instability_bucket(instability_home),
+        instability_bucket_away=instability_bucket(instability_away),
+        recency_weight_home=round(w_recent_home, 2),
+        recency_weight_away=round(w_recent_away, 2),
         # Totals prediction fields
         expected_possessions=round(totals.expected_possessions, 1),
         ppp_home=round(totals.ppp_home, 3),

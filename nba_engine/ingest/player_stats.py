@@ -41,6 +41,9 @@ class PlayerImpact:
     assists_per_game: float = 0.0
     fg_pct: float = 0.0
     fg3_pct: float = 0.0
+    steals_per_game: float = 0.0
+    blocks_per_game: float = 0.0
+    turnovers_per_game: float = 0.0
     threes_made_per_game: float = 0.0  # FG3M per game for projections
     player_id: int = 0  # NBA player ID
     
@@ -78,10 +81,24 @@ def get_player_stats(
             team_players = {}
             
             for _, row in df.iterrows():
-                team_id = row.get("TEAM_ID")
-                team_abbrev = TEAM_ID_TO_ABBREV.get(team_id, "UNK")
-                
-                if team_abbrev == "UNK":
+                team_abbrev = None
+
+                # 1) Prefer TEAM_ABBREVIATION directly (most reliable)
+                raw_abbrev = row.get("TEAM_ABBREVIATION")
+                if raw_abbrev and str(raw_abbrev).strip() and str(raw_abbrev) != "nan":
+                    team_abbrev = str(raw_abbrev).strip().upper()
+
+                # 2) Fallback to TEAM_ID mapping, but cast safely
+                if not team_abbrev:
+                    team_id = row.get("TEAM_ID", None)
+                    try:
+                        if team_id is not None and str(team_id) != "nan":
+                            team_id_int = int(float(team_id))
+                            team_abbrev = TEAM_ID_TO_ABBREV.get(team_id_int)
+                    except Exception:
+                        team_abbrev = None
+
+                if not team_abbrev:
                     continue
                 
                 mpg = float(row.get("MIN", 0) or 0)
@@ -95,6 +112,11 @@ def get_player_stats(
                 
                 # Extract 3-pointers made per game (FG3M)
                 fg3m = float(row.get("FG3M", 0) or 0)
+                
+                # Extract defensive / turnover stats
+                spg = float(row.get("STL", 0) or 0)
+                bpg = float(row.get("BLK", 0) or 0)
+                topg = float(row.get("TOV", 0) or 0)
                 
                 # Get player ID
                 player_id = int(row.get("PLAYER_ID", 0) or 0)
@@ -118,6 +140,9 @@ def get_player_stats(
                     assists_per_game=apg,
                     fg_pct=fg_pct,
                     fg3_pct=fg3_pct,
+                    steals_per_game=spg,
+                    blocks_per_game=bpg,
+                    turnovers_per_game=topg,
                     threes_made_per_game=fg3m,
                     player_id=player_id,
                 )
@@ -137,6 +162,14 @@ def get_player_stats(
                         player.is_star = True
             
             print(f"  Loaded player stats for {len(team_players)} teams.")
+
+            if len(team_players) < 20:
+                print(f"  ⚠ WARNING: Only {len(team_players)} teams returned from LeagueDashPlayerStats. Team mapping may be failing.")
+                # Print a small sample of missing common teams
+                for t in ["BOS", "LAL", "GSW", "NYK"]:
+                    if t not in team_players:
+                        print(f"  ⚠ Missing team in player stats: {t}")
+
             return team_players
             
         except Exception as e:
