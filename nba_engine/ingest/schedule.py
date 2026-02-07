@@ -11,7 +11,14 @@ from typing import Optional, Tuple
 import time
 import requests
 
-from nba_api.live.nba.endpoints import scoreboard
+# Import nba_api with clear error if missing (common issue in PyInstaller builds)
+try:
+    from nba_api.live.nba.endpoints import scoreboard
+    NBA_API_AVAILABLE = True
+except ImportError as e:
+    NBA_API_AVAILABLE = False
+    _NBA_API_ERROR = f"nba_api.live not available: {e}"
+    scoreboard = None
 
 
 @dataclass
@@ -125,10 +132,23 @@ def get_todays_games(
     
     Returns:
         Tuple of (games_list, api_date, is_current_date)
+    
+    Raises:
+        RuntimeError: If schedule fetch fails completely (for clear UI error messages)
     """
     expected_date = get_eastern_date()
     api_date = "Unknown"
     is_current = False
+    
+    # Check if nba_api is available
+    if not NBA_API_AVAILABLE:
+        print(f"  ERROR: {_NBA_API_ERROR}")
+        # Try static schedule as fallback
+        print(f"  Attempting static schedule fallback...")
+        static_games = _fetch_from_static_schedule(expected_date)
+        if static_games:
+            return static_games, expected_date, True
+        raise RuntimeError(f"Schedule fetch failed: {_NBA_API_ERROR}")
     
     # First, try the live scoreboard
     for attempt in range(max_retries):

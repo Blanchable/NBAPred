@@ -128,6 +128,23 @@ class NBAPredictor(tk.Tk):
         
         # Load initial winrate stats from database
         self.after(250, self.refresh_stats_from_db)
+        
+        # Run dependency smoke check
+        self.after(500, self._dependency_smoke_check)
+    
+    def _dependency_smoke_check(self):
+        """Check that critical dependencies are available (especially for PyInstaller builds)."""
+        try:
+            from nba_api.live.nba.endpoints import scoreboard  # noqa
+            self.log("Dependency check: nba_api.live OK")
+        except Exception as e:
+            self.log(f"Dependency check FAILED: nba_api.live not available ({type(e).__name__}: {e})")
+            messagebox.showwarning(
+                "Dependency missing",
+                "nba_api.live is missing. Roster/Projections may not load.\n\n"
+                "If running from EXE, rebuild with PyInstaller hidden imports for nba_api.live.\n\n"
+                f"Error: {type(e).__name__}: {e}"
+            )
     
     def setup_styles(self):
         """Configure ttk styles for modern appearance."""
@@ -1292,11 +1309,15 @@ class NBAPredictor(tk.Tk):
         self.log(f"  Loaded {len(rows)} players for {self.roster_team_var.get()}")
     
     def _roster_load_error(self, error_msg: str):
-        """Handle roster load error."""
-        self.roster_tonight_var.set("Error loading roster")
-        self.roster_refresh_btn.config(state=tk.NORMAL)
+        """Handle roster load error with popup notification."""
         self.roster_loading = False
-        self.log(f"  {error_msg}")
+        try:
+            self.roster_tonight_var.set("Error loading roster")
+            self.roster_refresh_btn.config(state=tk.NORMAL)
+        except Exception:
+            pass
+        self.log(f"ERROR (Roster): {error_msg}")
+        messagebox.showerror("Roster failed to load", error_msg)
     
     # =========================================================================
     # PROJECTIONS TAB
@@ -1776,12 +1797,16 @@ class NBAPredictor(tk.Tk):
         self.log(f"  Loaded {len(projections)} player projections")
     
     def _proj_load_error(self, error_msg: str):
-        """Handle projection load error."""
-        self.proj_updated_var.set("Error loading")
-        self.proj_refresh_btn.config(state=tk.NORMAL)
-        self.proj_injuries_btn.config(state=tk.NORMAL)
+        """Handle projection load error with popup notification."""
         self.projections_loading = False
-        self.log(f"  {error_msg}")
+        try:
+            self.proj_updated_var.set("Error loading")
+            self.proj_refresh_btn.config(state=tk.NORMAL)
+            self.proj_injuries_btn.config(state=tk.NORMAL)
+        except Exception:
+            pass
+        self.log(f"ERROR (Projections): {error_msg}")
+        messagebox.showerror("Projections failed to load", error_msg)
     
     def log(self, message: str):
         """Add a message to the log."""
