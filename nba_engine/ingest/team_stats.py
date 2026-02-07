@@ -24,6 +24,13 @@ HEADERS = {
 # Team abbreviation to ID mapping
 TEAM_ABBREV_TO_ID = {team['abbreviation']: team['id'] for team in nba_teams.get_teams()}
 
+# Module-level flag for data health reporting
+_recent_metrics_ok = False
+
+def recent_metrics_available() -> bool:
+    """Return True if the last fetch_recent_team_metrics call succeeded."""
+    return _recent_metrics_ok
+
 
 @dataclass
 class TeamStrength:
@@ -176,17 +183,21 @@ def get_comprehensive_team_stats(
         print("  No teams loaded, using fallback data...")
         return get_fallback_team_strength()
     
-    # Populate recent last-N metrics (best effort)
+    # Populate recent last-N metrics (best effort, non-fatal)
+    global _recent_metrics_ok
+    _recent_metrics_ok = False
     try:
         from model.config import RECENT_GAMES_N
         recent = fetch_recent_team_metrics(season, last_n=RECENT_GAMES_N, timeout=timeout)
-        for abbrev, ts in teams.items():
-            rm = recent.get(abbrev)
-            if rm:
-                ts.recent_off_rating = rm.get("recent_off_rating", 0.0)
-                ts.recent_def_rating = rm.get("recent_def_rating", 0.0)
-                ts.recent_net_rating = rm.get("recent_net_rating", 0.0)
-                ts.recent_pace = rm.get("recent_pace", 0.0)
+        if recent:
+            for abbrev, ts in teams.items():
+                rm = recent.get(abbrev)
+                if rm:
+                    ts.recent_off_rating = rm.get("recent_off_rating", 0.0)
+                    ts.recent_def_rating = rm.get("recent_def_rating", 0.0)
+                    ts.recent_net_rating = rm.get("recent_net_rating", 0.0)
+                    ts.recent_pace = rm.get("recent_pace", 0.0)
+            _recent_metrics_ok = True
     except Exception as e:
         print(f"  Recent metrics enrichment failed (non-fatal): {e}")
     
@@ -256,14 +267,19 @@ def fetch_recent_team_metrics(
     """
     Fetch recent last-N-game metrics for every team.
 
-    Tries LeagueDashTeamStats with LastNGames first.  Falls back to
-    per-team TeamGameLog if the endpoint does not support the parameter.
+    ONLY uses LeagueDashTeamStats with last_n_games (Per100Possessions).
+    If the call fails or returns incomplete data, returns an empty dict so
+    effective_metric() will fall back to full-season values (recent=0.0).
+
+    The previous TeamGameLog fallback was removed because it mixed raw
+    points with per-100-possession ratings, silently poisoning the model.
 
     Returns:
         Dict mapping team abbreviation to dict with keys:
         recent_off_rating, recent_def_rating, recent_net_rating, recent_pace
+        (all per-100-possession, same units as season metrics).
+        Empty dict if fetch fails (model safely uses season metrics).
     """
-    # Attempt 1 – LeagueDashTeamStats with LastNGames parameter
     try:
         stats = leaguedashteamstats.LeagueDashTeamStats(
             season=season,
@@ -274,57 +290,41 @@ def fetch_recent_team_metrics(
             headers=HEADERS,
         )
         df = stats.get_data_frames()[0]
+
+        # Validate required columns exist
+        required = {"TEAM_ABBREVIATION", "OFF_RATING", "DEF_RATING", "NET_RATING", "PACE"}
+        if not required.issubset(set(df.columns)):
+            missing = required - set(df.columns)
+            print(f"  Recent metrics missing columns {missing}; using season metrics only.")
+            return {}
+
         result = {}
         for _, row in df.iterrows():
             abbrev = row.get("TEAM_ABBREVIATION", "")
             if not abbrev:
                 continue
+            off_r = float(row.get("OFF_RATING", 0) or 0)
+            def_r = float(row.get("DEF_RATING", 0) or 0)
+            net_r = float(row.get("NET_RATING", 0) or 0)
+            pace  = float(row.get("PACE", 0) or 0)
+            # Sanity: if all four are exactly 0 the row is suspect; skip
+            if off_r == 0 and def_r == 0 and net_r == 0 and pace == 0:
+                continue
             result[abbrev] = {
-                "recent_off_rating": float(row.get("OFF_RATING", 0) or 0),
-                "recent_def_rating": float(row.get("DEF_RATING", 0) or 0),
-                "recent_net_rating": float(row.get("NET_RATING", 0) or 0),
-                "recent_pace": float(row.get("PACE", 0) or 0),
+                "recent_off_rating": off_r,
+                "recent_def_rating": def_r,
+                "recent_net_rating": net_r,
+                "recent_pace": pace,
             }
         if result:
             print(f"  Loaded recent {last_n}-game metrics for {len(result)} teams (LeagueDash).")
             return result
+        else:
+            print("  Recent metrics returned empty; using season metrics only.")
+            return {}
     except Exception as e:
-        print(f"  LeagueDash recent fetch failed: {e}")
-
-    # Attempt 2 – Per-team TeamGameLog (slower but reliable)
-    print(f"  Falling back to per-team game-log for recent metrics (last {last_n})...")
-    result = {}
-    for abbrev, team_id in TEAM_ABBREV_TO_ID.items():
-        try:
-            game_log = teamgamelog.TeamGameLog(
-                team_id=team_id,
-                season=season,
-                timeout=timeout,
-                headers=HEADERS,
-            )
-            df = game_log.get_data_frames()[0]
-            recent = df.head(last_n)
-            if len(recent) == 0:
-                continue
-
-            plus_minus = recent["PLUS_MINUS"].astype(float).mean() if "PLUS_MINUS" in recent.columns else 0.0
-            pts = recent["PTS"].astype(float).mean()
-            # Rough offensive/defensive proxy from game log
-            result[abbrev] = {
-                "recent_off_rating": pts,          # not per-100 but usable as proxy
-                "recent_def_rating": pts - plus_minus,
-                "recent_net_rating": plus_minus,
-                "recent_pace": 0.0,                # not available from game log
-            }
-            time.sleep(0.3)  # rate-limit courtesy
-        except Exception:
-            pass
-
-    if result:
-        print(f"  Loaded recent metrics for {len(result)} teams (game-log fallback).")
-    else:
-        print("  WARNING: Could not load any recent team metrics.")
-    return result
+        print(f"  Recent team metrics unavailable ({e}); using season metrics only.")
+        return {}
 
 
 def get_recent_form(

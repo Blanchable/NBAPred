@@ -42,23 +42,25 @@ FACTOR_WEIGHTS = {
     "lineup_net_rating": 18,     # Primary team strength signal (softcapped)
     "star_impact": 7,            # Injury awareness
     "rotation_replacement": 5,   # Next-man-up quality
-    "off_vs_def": 12,            # Matchup efficiency
-    "turnover_diff": 6,          # Ball security
-    "shooting_advantage": 8,     # Combined eFG + 3P (replaces shot_quality + three_point_edge)
-    "free_throw_diff": 4,        # FT rate differential (replaces free_throw_rate)
+    "off_vs_def": 16,            # Matchup efficiency  (+4 from retired matchup_fit)
+    "turnover_diff": 9,          # Ball security         (+3 from retired bench_depth)
+    "shooting_advantage": 8,     # Combined eFG + 3P
+    "free_throw_diff": 4,        # FT rate differential
     "rebounding": 6,             # Board control
     "home_road_split": 3,        # Home/road performance split
     "home_court": 4,             # Basic home advantage
     "rest_fatigue": 5,           # Rest days
-    "rim_protection": 3,         # Interior defense (reduced to avoid overlap)
-    "perimeter_defense": 2,      # Perimeter D (reduced to avoid overlap)
-    "matchup_fit": 4,            # Style matchups
-    "bench_depth": 3,            # Rotation quality (reduced to avoid net rating overlap)
+    "rim_protection": 3,         # Interior defense
+    "perimeter_defense": 2,      # Perimeter D
+    "schedule_stress": 3,        # NEW: B2B / 3-in-4 / travel fatigue
     "pace_control": 2,           # Tempo advantage
-    "late_game_creation": 3,     # Clutch proxy
     "variance_signal": 5,        # 3P reliance (affects confidence)
     "coaching": 0,               # Neutral (no data)
     "motivation": 0,             # Neutral (no data)
+    # Retired (kept at 0 for display-only / backward compat)
+    "matchup_fit": 0,
+    "bench_depth": 0,
+    "late_game_creation": 0,
 }
 
 # Verify weights sum to 100
@@ -80,10 +82,11 @@ FACTOR_NAMES = {
     "rest_fatigue": "Rest/Fatigue",
     "rim_protection": "Rim Protection",
     "perimeter_defense": "Perimeter Defense",
-    "matchup_fit": "Matchup Fit",
-    "bench_depth": "Bench Depth",
+    "matchup_fit": "Matchup Fit (retired)",
+    "bench_depth": "Bench Depth (retired)",
     "pace_control": "Pace Control",
-    "late_game_creation": "Late Game Creation",
+    "schedule_stress": "Schedule Stress",
+    "late_game_creation": "Late Game (retired)",
     "variance_signal": "Variance Signal",
     "coaching": "Coaching",
     "motivation": "Motivation",
@@ -104,6 +107,7 @@ SCALES = {
     "rim": 6.0,
     "perimeter": 6.0,
     "availability": 0.25,
+    "schedule_stress": 0.6,  # stress delta ~0.6 normalizes to ±1.0
 }
 
 # Edge score to margin mapping
@@ -229,10 +233,8 @@ class GameScore:
         if is_strong("perimeter_defense"):
             count += 1
         
-        # Rebounding and bench stability
+        # Rebounding
         if is_strong("rebounding"):
-            count += 1
-        if is_strong("bench_depth"):
             count += 1
         
         return count
@@ -878,6 +880,34 @@ def calc_rest_fatigue(
     )
 
 
+def calc_schedule_stress(
+    home_stress_norm: float,
+    away_stress_norm: float,
+    home_inputs: str = "",
+    away_inputs: str = "",
+) -> FactorResult:
+    """
+    Factor: Schedule Stress (3 points)
+    
+    Captures B2B, 3-in-4, and travel fatigue.  Higher stress on the
+    home side tilts the score toward the away team and vice versa.
+    """
+    # Positive signed_value = home advantage (away more stressed)
+    delta = away_stress_norm - home_stress_norm
+    signed_value = clamp(delta / SCALES["schedule_stress"])
+    
+    inputs = f"Home:{home_stress_norm:.2f} ({home_inputs}) Away:{away_stress_norm:.2f} ({away_inputs})"
+    
+    return FactorResult(
+        name="schedule_stress",
+        display_name=FACTOR_NAMES["schedule_stress"],
+        weight=FACTOR_WEIGHTS["schedule_stress"],
+        signed_value=signed_value,
+        contribution=FACTOR_WEIGHTS["schedule_stress"] * signed_value,
+        inputs_used=inputs,
+    )
+
+
 def calc_rim_protection(
     home_def_rating: float,
     away_def_rating: float,
@@ -1101,6 +1131,10 @@ def score_game_v3(
     away_injuries: list = None,
     instability_home: float = 0.0,
     instability_away: float = 0.0,
+    home_stress_norm: float = 0.0,
+    away_stress_norm: float = 0.0,
+    home_stress_inputs: str = "",
+    away_stress_inputs: str = "",
 ) -> GameScore:
     """
     Score a game using the v3 20-factor weighted point system.
@@ -1292,16 +1326,30 @@ def score_game_v3(
     factors.append(calc_rest_fatigue(home_rest_days, away_rest_days))
     factors.append(calc_rim_protection(home_def, away_def))
     factors.append(calc_perimeter_defense(home_opp_efg, away_opp_efg, home_opp_efg_fb, away_opp_efg_fb))
-    factors.append(calc_matchup_fit(
-        home_oreb, home_fg3a_rate,
-        away_oreb, away_fg3a_rate
+    factors.append(calc_schedule_stress(
+        home_stress_norm, away_stress_norm,
+        home_stress_inputs, away_stress_inputs,
     ))
-    factors.append(calc_bench_depth(home_adj_net, away_adj_net))
     factors.append(calc_pace_control(home_pace, away_pace, home_pace_fb, away_pace_fb))
-    factors.append(calc_late_game_creation(home_off, away_off))
-    factors.append(calc_coaching())
     factors.append(calc_variance_signal(home_fg3a_rate, away_fg3a_rate))
+    factors.append(calc_coaching())
     factors.append(calc_motivation())
+    # Retired factors (0 weight, info-only rows)
+    factors.append(FactorResult(
+        name="matchup_fit", display_name=FACTOR_NAMES["matchup_fit"],
+        weight=0, signed_value=0.0, contribution=0.0,
+        inputs_used="Retired (weight redistributed to off_vs_def)",
+    ))
+    factors.append(FactorResult(
+        name="bench_depth", display_name=FACTOR_NAMES["bench_depth"],
+        weight=0, signed_value=0.0, contribution=0.0,
+        inputs_used="Retired (weight redistributed to turnover_diff)",
+    ))
+    factors.append(FactorResult(
+        name="late_game_creation", display_name=FACTOR_NAMES["late_game_creation"],
+        weight=0, signed_value=0.0, contribution=0.0,
+        inputs_used="Retired (weight redistributed to schedule_stress)",
+    ))
     
     # Debug: Log factor debug info
     if DEBUG_FACTORS:
@@ -1345,6 +1393,12 @@ def score_game_v3(
 
     # Apply compression to the win-probability spread (preserves 50 % midpoint)
     home_win_prob = 0.5 + (home_win_prob - 0.5) * conf_mult
+    away_win_prob = 1.0 - home_win_prob
+
+    # ── Schedule stress confidence compression (~5 % at max) ─────
+    worst_stress = max(home_stress_norm, away_stress_norm)
+    stress_conf_mult = 1.0 - 0.05 * worst_stress
+    home_win_prob = 0.5 + (home_win_prob - 0.5) * stress_conf_mult
     away_win_prob = 1.0 - home_win_prob
 
     # Determine predicted winner using EDGE (not probability!)
