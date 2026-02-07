@@ -752,6 +752,24 @@ class NBAPredictor(tk.Tk):
                 font=('Segoe UI', 10), bg=COLORS['bg'],
                 fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
         
+        # Instability / recency info bar
+        instab_bar = tk.Frame(container, bg=COLORS['bg'], padx=10, pady=5)
+        instab_bar.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        tk.Label(instab_bar, text="Roster Instability:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_instab_var = tk.StringVar(value="--")
+        tk.Label(instab_bar, textvariable=self.factor_instab_var,
+                font=('Segoe UI', 9), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 20))
+
+        tk.Label(instab_bar, text="Recency Weight:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_recency_var = tk.StringVar(value="--")
+        tk.Label(instab_bar, textvariable=self.factor_recency_var,
+                font=('Segoe UI', 9), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
+
         # Factors tree
         tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -2260,6 +2278,33 @@ class NBAPredictor(tk.Tk):
             
             self.injuries = injuries
             
+            # Compute roster instability
+            self.log("\n  Computing roster instability...")
+            from services.instability import compute_instability_map, instability_bucket
+            
+            # Build per-team injury lists for signature building
+            injuries_by_team_for_sig = {}
+            for inj in injuries:
+                t = getattr(inj, 'team', '')
+                if t:
+                    injuries_by_team_for_sig.setdefault(t, []).append(inj)
+            
+            instability_map = compute_instability_map(
+                player_stats_by_team=player_stats,
+                injuries_by_team=injuries_by_team_for_sig,
+            )
+            
+            # Stamp instability onto TeamStrength objects
+            for abbrev, ts in team_strength.items():
+                ts.instability = instability_map.get(abbrev, 0.0)
+            
+            unstable = [(t, v) for t, v in instability_map.items() if v >= 0.10]
+            if unstable:
+                for t, v in sorted(unstable, key=lambda x: -x[1]):
+                    self.log(f"    {t}: {v:.2f} ({instability_bucket(v)})")
+            else:
+                self.log("  All teams stable (instability < 0.10)")
+            
             # Generate predictions
             self.log("\n[7/7] Generating predictions...")
             scores = []
@@ -2317,6 +2362,8 @@ class NBAPredictor(tk.Tk):
                     away_players=away_players,
                     home_injuries=home_injuries,
                     away_injuries=away_injuries,
+                    instability_home=instability_map.get(game.home_team, 0.0),
+                    instability_away=instability_map.get(game.away_team, 0.0),
                 )
                 
                 score.game_id = game.game_id
@@ -2578,6 +2625,18 @@ class NBAPredictor(tk.Tk):
                 self.factor_ppp_var.set(
                     f"{score.away_team} {score.ppp_away:.3f} / "
                     f"{score.home_team} {score.ppp_home:.3f}"
+                )
+                
+                # Update instability / recency display
+                home_ib = getattr(score, 'instability_bucket_home', 'NONE')
+                away_ib = getattr(score, 'instability_bucket_away', 'NONE')
+                self.factor_instab_var.set(
+                    f"{score.home_team} {home_ib}  /  {score.away_team} {away_ib}"
+                )
+                rw_home = getattr(score, 'recency_weight_home', 0.20)
+                rw_away = getattr(score, 'recency_weight_away', 0.20)
+                self.factor_recency_var.set(
+                    f"{score.home_team} {rw_home:.0%}  /  {score.away_team} {rw_away:.0%}"
                 )
                 
                 # Display factors

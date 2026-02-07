@@ -160,6 +160,14 @@ class GameScore:
     away_power_rating: float = 0.0
     factors: list[FactorResult] = field(default_factory=list)
     
+    # Instability metadata (for UI display)
+    instability_home: float = 0.0
+    instability_away: float = 0.0
+    instability_bucket_home: str = "NONE"
+    instability_bucket_away: str = "NONE"
+    recency_weight_home: float = 0.0
+    recency_weight_away: float = 0.0
+    
     # Totals prediction fields
     expected_possessions: float = 0.0
     ppp_home: float = 0.0
@@ -1055,6 +1063,26 @@ def calc_motivation() -> FactorResult:
 
 
 # ============================================================================
+# RECENCY BLENDING HELPER
+# ============================================================================
+
+def effective_metric(
+    season_value: float,
+    recent_value: float,
+    w_recent: float,
+) -> float:
+    """
+    Blend a season metric with its recent counterpart.
+
+    If ``recent_value`` is zero (missing / not available), fall back to the
+    full-season value so the model never degrades when data is absent.
+    """
+    if recent_value == 0.0:
+        return season_value
+    return (1.0 - w_recent) * season_value + w_recent * recent_value
+
+
+# ============================================================================
 # MAIN SCORING FUNCTION (V3)
 # ============================================================================
 
@@ -1071,12 +1099,15 @@ def score_game_v3(
     away_players: list = None,
     home_injuries: list = None,
     away_injuries: list = None,
+    instability_home: float = 0.0,
+    instability_away: float = 0.0,
 ) -> GameScore:
     """
     Score a game using the v3 20-factor weighted point system.
     
     This version uses lineup-adjusted strengths, home/road splits,
-    and the new tiered star impact system.
+    the tiered star impact system, recency blending, and roster-
+    instability modifiers.
     """
     # CRITICAL: Ensure home_stats and away_stats are distinct objects
     # This prevents shared reference bugs
@@ -1145,11 +1176,59 @@ def score_game_v3(
     home_pace, home_pace_fb, _ = safe_get_with_fallback(home_stats, 'pace', 100, home_team)
     away_pace, away_pace_fb, _ = safe_get_with_fallback(away_stats, 'pace', 100, away_team)
     
+    # ── Recency blending ────────────────────────────────────────────
+    # Compute per-team recency weights based on roster instability.
+    from services.instability import (
+        instability_to_recency_weight,
+        instability_netrating_mult,
+        instability_conf_mult,
+        instability_score_penalty,
+        instability_bucket,
+    )
+
+    w_recent_home = instability_to_recency_weight(instability_home)
+    w_recent_away = instability_to_recency_weight(instability_away)
+
+    home_recent_off = safe_get(home_stats, 'recent_off_rating', 0)
+    home_recent_def = safe_get(home_stats, 'recent_def_rating', 0)
+    home_recent_net = safe_get(home_stats, 'recent_net_rating', 0)
+    home_recent_pace = safe_get(home_stats, 'recent_pace', 0)
+
+    away_recent_off = safe_get(away_stats, 'recent_off_rating', 0)
+    away_recent_def = safe_get(away_stats, 'recent_def_rating', 0)
+    away_recent_net = safe_get(away_stats, 'recent_net_rating', 0)
+    away_recent_pace = safe_get(away_stats, 'recent_pace', 0)
+
+    # Blend season values with recent values
+    home_off = effective_metric(home_off, home_recent_off, w_recent_home)
+    home_def = effective_metric(home_def, home_recent_def, w_recent_home)
+    away_off = effective_metric(away_off, away_recent_off, w_recent_away)
+    away_def = effective_metric(away_def, away_recent_def, w_recent_away)
+
+    home_pace = effective_metric(home_pace, home_recent_pace, w_recent_home)
+    away_pace = effective_metric(away_pace, away_recent_pace, w_recent_away)
+
+    # Also blend the lineup-adjusted net rating with recent net rating
+    home_adj_net = effective_metric(home_adj_net, home_recent_net, w_recent_home)
+    away_adj_net = effective_metric(away_adj_net, away_recent_net, w_recent_away)
+
+    # ── Net-rating instability dampening ──────────────────────────
+    # Reduce net-rating dominance for the favored side when instability
+    # is elevated (stale / shifted data shouldn't drive big edges).
+    net_delta_raw = home_adj_net - away_adj_net
+    if net_delta_raw > 0:
+        net_mult = instability_netrating_mult(instability_home)
+    else:
+        net_mult = instability_netrating_mult(instability_away)
+
     # Debug logging for data provenance
     if DEBUG_FACTORS:
         print(f"\n[FACTOR_DEBUG] Game: {away_team} @ {home_team}")
         print(f"[FACTOR_DEBUG] home_stats id={id(home_stats)}, away_stats id={id(away_stats)}")
-        print(f"[FACTOR_DEBUG] Stats comparison:")
+        print(f"[FACTOR_DEBUG] Instability: home={instability_home:.3f} ({instability_bucket(instability_home)}) "
+              f"away={instability_away:.3f} ({instability_bucket(instability_away)})")
+        print(f"[FACTOR_DEBUG] Recency weights: home={w_recent_home:.2f} away={w_recent_away:.2f}")
+        print(f"[FACTOR_DEBUG] Stats comparison (after blending):")
         print(f"  efg_pct: home={home_efg:.4f} (fb={home_efg_fb}) away={away_efg:.4f} (fb={away_efg_fb}) diff={home_efg-away_efg:.4f}")
         print(f"  tov_pct: home={home_tov:.4f} (fb={home_tov_fb}) away={away_tov:.4f} (fb={away_tov_fb}) diff={home_tov-away_tov:.4f}")
         print(f"  oreb_pct: home={home_oreb:.4f} (fb={home_oreb_fb}) away={away_oreb:.4f} (fb={away_oreb_fb}) diff={home_oreb-away_oreb:.4f}")
@@ -1158,7 +1237,10 @@ def score_game_v3(
     factors = []
     
     # Calculate all factors
-    factors.append(calc_lineup_net_rating(home_adj_net, away_adj_net))
+    # Apply net-rating instability dampener to the lineup net rating factor
+    home_adj_net_damped = home_adj_net * net_mult if net_delta_raw > 0 else home_adj_net
+    away_adj_net_damped = away_adj_net * net_mult if net_delta_raw <= 0 else away_adj_net
+    factors.append(calc_lineup_net_rating(home_adj_net_damped, away_adj_net_damped))
     
     # Star Impact and Rotation Replacement (new tiered system)
     if home_players and away_players:
@@ -1255,6 +1337,16 @@ def score_game_v3(
     if abs(projected_margin) < 6 and home_win_prob > 0.85:
         print(f"  Warning: margin={projected_margin:.1f} but prob={home_win_prob:.1%} - check calibration")
     
+    # ── Instability confidence compression ──────────────────────────
+    # Compress confidence toward 50 % when either team is unstable,
+    # preventing "false locks" on games with heavy roster churn.
+    worst_instability = max(instability_home, instability_away)
+    conf_mult = instability_conf_mult(worst_instability)
+
+    # Apply compression to the win-probability spread (preserves 50 % midpoint)
+    home_win_prob = 0.5 + (home_win_prob - 0.5) * conf_mult
+    away_win_prob = 1.0 - home_win_prob
+
     # Determine predicted winner using EDGE (not probability!)
     # Confidence is the win probability of the chosen pick
     predicted_winner, confidence = decide_pick(
@@ -1297,6 +1389,13 @@ def score_game_v3(
         home_power_rating=round(home_power, 1),
         away_power_rating=round(away_power, 1),
         factors=factors,
+        # Instability metadata
+        instability_home=round(instability_home, 3),
+        instability_away=round(instability_away, 3),
+        instability_bucket_home=instability_bucket(instability_home),
+        instability_bucket_away=instability_bucket(instability_away),
+        recency_weight_home=round(w_recent_home, 2),
+        recency_weight_away=round(w_recent_away, 2),
         # Totals prediction fields
         expected_possessions=round(totals.expected_possessions, 1),
         ppp_home=round(totals.ppp_home, 3),

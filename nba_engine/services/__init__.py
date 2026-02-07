@@ -1,4 +1,4 @@
-"""Services module for score fetching, grading, and projections."""
+"""Services module for score fetching, grading, projections, and instability."""
 
 from .scores import (
     ScoreProvider,
@@ -19,6 +19,18 @@ from .projections import (
     status_to_multiplier,
     uncertainty_from_status,
 )
+from .instability import (
+    compute_instability_map,
+    build_rotation_signature,
+    compute_instability,
+    save_signatures,
+    load_previous_signatures,
+    instability_to_recency_weight,
+    instability_bucket,
+    instability_conf_mult,
+    instability_netrating_mult,
+    instability_score_penalty,
+)
 
 __all__ = [
     'ScoreProvider',
@@ -34,4 +46,14 @@ __all__ = [
     'project_slate',
     'status_to_multiplier',
     'uncertainty_from_status',
+    'compute_instability_map',
+    'build_rotation_signature',
+    'compute_instability',
+    'save_signatures',
+    'load_previous_signatures',
+    'instability_to_recency_weight',
+    'instability_bucket',
+    'instability_conf_mult',
+    'instability_netrating_mult',
+    'instability_score_penalty',
 ]
