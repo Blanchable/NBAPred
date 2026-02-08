@@ -3,8 +3,11 @@
 from .scores import (
     ScoreProvider,
     NBALiveScoreProvider,
+    NBAStatsScoreProvider,
     fetch_scores_for_date,
+    fetch_scores_for_past_date,
     GameScoreUpdate,
+    SCORE_BACKFILL_DAYS,
 )
 from .grading import (
     grade_picks_for_date,

@@ -249,8 +249,124 @@ class NBAApiScoreProvider(ScoreProvider):
 
 
 # ============================================================================
-# CONVENIENCE FUNCTION
+# HISTORICAL SCORE PROVIDER (for backfill grading)
 # ============================================================================
+
+class NBAStatsScoreProvider(ScoreProvider):
+    """
+    Score provider using nba_api.stats ScoreboardV2 endpoint.
+
+    Unlike the live scoreboard (today only), this supports **any date**
+    and is used to backfill scores for games from previous days.
+    """
+
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://www.nba.com',
+        'Referer': 'https://www.nba.com/',
+    }
+
+    def __init__(self, timeout: int = 30):
+        self.timeout = timeout
+
+    def get_games_for_date(self, date_str: str) -> List[GameScoreUpdate]:
+        """
+        Fetch games from ScoreboardV2 for an arbitrary date.
+
+        Args:
+            date_str: Date in YYYY-MM-DD format (e.g. "2026-02-05")
+
+        Returns:
+            List of GameScoreUpdate objects
+        """
+        games: List[GameScoreUpdate] = []
+        try:
+            from nba_api.stats.endpoints import scoreboardv2
+
+            # ScoreboardV2 wants MM/DD/YYYY
+            parts = date_str.split("-")
+            api_date = f"{parts[1]}/{parts[2]}/{parts[0]}"
+
+            sb = scoreboardv2.ScoreboardV2(
+                game_date=api_date,
+                timeout=self.timeout,
+                headers=self.HEADERS,
+            )
+            dfs = sb.get_data_frames()
+            if not dfs:
+                return games
+
+            # First DataFrame is GameHeader
+            header_df = dfs[0]
+            # Fifth DataFrame is LineScore (team-level scores)
+            line_df = dfs[1] if len(dfs) > 1 else None
+
+            # Build team-score lookup from LineScore
+            team_scores: dict = {}  # game_id -> {team_id: score}
+            if line_df is not None and len(line_df) > 0:
+                for _, row in line_df.iterrows():
+                    gid = str(row.get("GAME_ID", ""))
+                    tid = row.get("TEAM_ID")
+                    pts = row.get("PTS")
+                    if gid and tid is not None:
+                        team_scores.setdefault(gid, {})[tid] = int(pts) if pts is not None else None
+
+            for _, row in header_df.iterrows():
+                game_id = str(row.get("GAME_ID", ""))
+                game_status = int(row.get("GAME_STATUS_ID", 1))
+                home_tid = row.get("HOME_TEAM_ID")
+                away_tid = row.get("VISITOR_TEAM_ID")
+
+                if game_status == 3:
+                    status = "final"
+                elif game_status == 2:
+                    status = "in_progress"
+                else:
+                    status = "scheduled"
+
+                scores_for_game = team_scores.get(game_id, {})
+                home_score = scores_for_game.get(home_tid)
+                away_score = scores_for_game.get(away_tid)
+
+                # Team abbreviations from the header columns
+                home_abbrev = str(row.get("HOME_TEAM_ABBREVIATION", "") or "")
+                away_abbrev = str(row.get("VISITOR_TEAM_ABBREVIATION", "") or "")
+
+                # Fallback: try GAMECODE which is "YYYYMMDD/AWYHOM"
+                if (not home_abbrev or not away_abbrev) and row.get("GAMECODE"):
+                    gc = str(row["GAMECODE"])
+                    if "/" in gc:
+                        teams_part = gc.split("/")[1]
+                        if len(teams_part) == 6:
+                            away_abbrev = away_abbrev or teams_part[:3]
+                            home_abbrev = home_abbrev or teams_part[3:]
+
+                games.append(GameScoreUpdate(
+                    game_id=game_id,
+                    away_team=away_abbrev,
+                    home_team=home_abbrev,
+                    game_date=date_str,
+                    status=status,
+                    away_score=away_score,
+                    home_score=home_score,
+                ))
+
+        except ImportError:
+            print(f"  ScoreboardV2 not available for {date_str}")
+        except Exception as e:
+            print(f"  ScoreboardV2 fetch failed for {date_str}: {e}")
+
+        return games
+
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS
+# ============================================================================
+
+# Backfill window (days) for grading past games
+SCORE_BACKFILL_DAYS = 7
+
 
 def fetch_scores_for_date(
     date_str: Optional[str] = None,
@@ -278,6 +394,24 @@ def fetch_scores_for_date(
         provider = NBALiveScoreProvider()
     
     return provider.get_games_for_date(date_str)
+
+
+def fetch_scores_for_past_date(date_str: str) -> List[GameScoreUpdate]:
+    """
+    Fetch scores for a *past* date using the ScoreboardV2 stats endpoint.
+
+    Falls back to NBALiveScoreProvider if the date happens to be today.
+
+    Args:
+        date_str: Date in YYYY-MM-DD format
+
+    Returns:
+        List of GameScoreUpdate objects
+    """
+    today = get_today_date_et()
+    if date_str == today:
+        return fetch_scores_for_date(date_str)
+    return NBAStatsScoreProvider().get_games_for_date(date_str)
 
 
 def get_today_date_et() -> str:

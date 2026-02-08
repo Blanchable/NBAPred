@@ -59,6 +59,7 @@ from services import (
     fetch_scores_for_date,
     grade_picks_for_date,
 )
+from services.grading import grade_all_pending
 
 
 # Try to use ttkbootstrap for modern styling, fallback to plain ttk
@@ -355,7 +356,7 @@ class NBAPredictor(tk.Tk):
         
         self.check_scores_button = ttk.Button(
             right_frame,
-            text="📊 Check Scores",
+            text="📊 Check / Backfill Scores",
             command=self.check_scores,
             style='Secondary.TButton'
         )
@@ -2020,22 +2021,15 @@ class NBAPredictor(tk.Tk):
         self.auto_poll_job = self.after(poll_interval_ms, self.auto_check_scores)
     
     def auto_check_scores(self):
-        """Automatically check scores (called by timer)."""
+        """Automatically check scores with backfill (called by timer)."""
         if not self.auto_poll_var.get():
             return
         
-        self.log(f"\n[Auto-poll] Checking scores at {datetime.now().strftime('%H:%M:%S')}")
+        self.log(f"\n[Auto-poll] Backfill grading at {datetime.now().strftime('%H:%M:%S')}")
         
         def _auto_check():
             try:
-                from datetime import timezone, timedelta
-                
-                now_utc = datetime.now(timezone.utc)
-                et_offset = timedelta(hours=-5)
-                now_et = now_utc + et_offset
-                today = now_et.strftime("%Y-%m-%d")
-                
-                games_updated, picks_graded, picks_pending = grade_picks_for_date(today)
+                games_updated, picks_graded, picks_pending = grade_all_pending()
                 
                 self.log(f"  Graded: {picks_graded}, Pending: {picks_pending}")
                 
@@ -2051,34 +2045,30 @@ class NBAPredictor(tk.Tk):
         thread.start()
     
     def check_scores(self):
-        """Check scores for today's games and grade picks."""
+        """Check scores and backfill-grade picks across the last 7 days."""
         self.check_scores_button.config(state=tk.DISABLED)
-        self.status_var.set("Checking scores...")
+        self.status_var.set("Checking scores (backfill)...")
         
         def _check():
             try:
-                from datetime import datetime, timezone, timedelta
+                self.log(f"\nBackfill grading (last 7 days)...")
                 
-                # Get today's date in ET
-                now_utc = datetime.now(timezone.utc)
-                et_offset = timedelta(hours=-5)
-                now_et = now_utc + et_offset
-                today = now_et.strftime("%Y-%m-%d")
-                
-                self.log(f"\nChecking scores for {today}...")
-                
-                # Fetch scores and grade picks
-                games_updated, picks_graded, picks_pending = grade_picks_for_date(today)
+                # Grade ALL pending picks across the backfill window
+                games_updated, picks_graded, picks_pending = grade_all_pending()
                 
                 self.log(f"  Games updated: {games_updated}")
                 self.log(f"  Picks graded: {picks_graded}")
-                self.log(f"  Picks pending: {picks_pending}")
+                self.log(f"  Picks still pending: {picks_pending}")
                 
                 # Refresh stats display
                 self.after(0, self.refresh_stats_from_db)
-                self.after(0, lambda: self.status_var.set(f"Scores checked - {picks_graded} graded"))
+                self.after(0, lambda: self.status_var.set(
+                    f"Scores checked — {picks_graded} graded, {picks_pending} pending"
+                ))
                 
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.log(f"Error checking scores: {e}")
                 self.after(0, lambda: self.status_var.set(f"Error: {e}"))
             finally:
