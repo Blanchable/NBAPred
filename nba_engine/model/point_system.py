@@ -40,13 +40,13 @@ from .totals_prediction import predict_game_totals, TotalsPrediction
 # - Reduced defense and bench weights to avoid overlap with net rating
 FACTOR_WEIGHTS = {
     "lineup_net_rating": 18,     # Primary team strength signal (softcapped)
-    "star_impact": 7,            # Injury awareness
+    "star_impact": 4,            # Injury awareness (reduced from 7: ORTG adj handles bulk)
     "rotation_replacement": 5,   # Next-man-up quality
-    "off_vs_def": 16,            # Matchup efficiency  (+4 from retired matchup_fit)
-    "turnover_diff": 9,          # Ball security         (+3 from retired bench_depth)
+    "off_vs_def": 16,            # Matchup efficiency
+    "turnover_diff": 11,         # Ball security (+2 from star_impact reduction)
     "shooting_advantage": 8,     # Combined eFG + 3P
     "free_throw_diff": 4,        # FT rate differential
-    "rebounding": 6,             # Board control
+    "rebounding": 7,             # Board control (+1 from star_impact reduction)
     "home_road_split": 3,        # Home/road performance split
     "home_court": 4,             # Basic home advantage
     "rest_fatigue": 5,           # Rest days
@@ -663,22 +663,46 @@ def calc_off_vs_def(
     home_def: float,
     away_off: float,
     away_def: float,
+    t1_creator_out_home: bool = False,
+    t1_creator_out_away: bool = False,
+    inj_note_home: str = "",
+    inj_note_away: str = "",
 ) -> FactorResult:
     """
-    Factor 3: Off vs Def Efficiency (8 points)
+    Factor: Off vs Def Efficiency
+
+    When a Tier-1 creator is OUT, the signed_value is capped at ±0.65
+    to prevent the factor from overpowering the model on stale season
+    ORTG that no longer applies without the star.
     """
     home_edge = home_off - away_def
     away_edge = away_off - home_def
     delta = home_edge - away_edge
     signed_value = clamp(delta / SCALES["off_vs_def"])
-    
+
+    # ── Guardrail: cap when Tier-1 creator is OUT ─────────────────
+    cap_note = ""
+    if t1_creator_out_home or t1_creator_out_away:
+        cap = 0.65
+        if abs(signed_value) > cap:
+            cap_note = f" [capped ±{cap} T1-OUT]"
+            signed_value = clamp(signed_value, -cap, cap)
+
+    inputs = (f"HomeOff:{home_off:.1f} vs AwayDef:{away_def:.1f} | "
+              f"AwayOff:{away_off:.1f} vs HomeDef:{home_def:.1f}")
+    if inj_note_home:
+        inputs += f" | HomeInjAdj: {inj_note_home}"
+    if inj_note_away:
+        inputs += f" | AwayInjAdj: {inj_note_away}"
+    inputs += cap_note
+
     return FactorResult(
         name="off_vs_def",
         display_name=FACTOR_NAMES["off_vs_def"],
         weight=FACTOR_WEIGHTS["off_vs_def"],
         signed_value=signed_value,
         contribution=FACTOR_WEIGHTS["off_vs_def"] * signed_value,
-        inputs_used=f"HomeOff:{home_off:.1f} vs AwayDef:{away_def:.1f} | AwayOff:{away_off:.1f} vs HomeDef:{home_def:.1f}",
+        inputs_used=inputs,
     )
 
 
@@ -1246,6 +1270,52 @@ def score_game_v3(
     home_adj_net = effective_metric(home_adj_net, home_recent_net, w_recent_home)
     away_adj_net = effective_metric(away_adj_net, away_recent_net, w_recent_away)
 
+    # ── Injury efficiency adjustments (STEP 1-2) ───────────────────
+    # When a star is OUT, subtract per-100-possession penalties from the
+    # team's ORTG and net rating.  This flows into Off vs Def and Lineup
+    # Net Rating so the model sees a weaker team, not the season average.
+    from .injury_adjustments import (
+        build_out_list, compute_team_efficiency_adj, build_valid_sets,
+        TeamEfficiencyAdj,
+    )
+
+    home_valid_ids, home_valid_names = build_valid_sets(home_players or [])
+    away_valid_ids, away_valid_names = build_valid_sets(away_players or [])
+
+    home_out = build_out_list(
+        home_players or [], home_injuries or [], home_team,
+        valid_ids=home_valid_ids, valid_names=home_valid_names,
+    )
+    away_out = build_out_list(
+        away_players or [], away_injuries or [], away_team,
+        valid_ids=away_valid_ids, valid_names=away_valid_names,
+    )
+
+    home_eff_adj = compute_team_efficiency_adj(home_out)
+    away_eff_adj = compute_team_efficiency_adj(away_out)
+
+    # Apply penalties to offensive rating and net rating
+    home_off -= home_eff_adj.off_penalty
+    home_adj_net -= home_eff_adj.net_penalty
+    away_off -= away_eff_adj.off_penalty
+    away_adj_net -= away_eff_adj.net_penalty
+
+    # Build annotation strings for factor breakdown
+    _inj_note_home = (f"InjAdjOff:-{home_eff_adj.off_penalty:.1f} "
+                      f"InjAdjNet:-{home_eff_adj.net_penalty:.1f}"
+                      if home_eff_adj.off_penalty > 0 else "")
+    _inj_note_away = (f"InjAdjOff:-{away_eff_adj.off_penalty:.1f} "
+                      f"InjAdjNet:-{away_eff_adj.net_penalty:.1f}"
+                      if away_eff_adj.off_penalty > 0 else "")
+
+    if DEBUG_FACTORS and (home_out or away_out):
+        print(f"[INJ_ADJ] Home OUT: {[p.player_name for p in home_out]} "
+              f"offP={home_eff_adj.off_penalty:.1f} netP={home_eff_adj.net_penalty:.1f} "
+              f"T1creatorOUT={home_eff_adj.has_t1_creator_out}")
+        print(f"[INJ_ADJ] Away OUT: {[p.player_name for p in away_out]} "
+              f"offP={away_eff_adj.off_penalty:.1f} netP={away_eff_adj.net_penalty:.1f} "
+              f"T1creatorOUT={away_eff_adj.has_t1_creator_out}")
+
     # ── Net-rating instability dampening ──────────────────────────
     # Reduce net-rating dominance for the favored side when instability
     # is elevated (stale / shifted data shouldn't drive big edges).
@@ -1274,7 +1344,17 @@ def score_game_v3(
     # Apply net-rating instability dampener to the lineup net rating factor
     home_adj_net_damped = home_adj_net * net_mult if net_delta_raw > 0 else home_adj_net
     away_adj_net_damped = away_adj_net * net_mult if net_delta_raw <= 0 else away_adj_net
-    factors.append(calc_lineup_net_rating(home_adj_net_damped, away_adj_net_damped))
+
+    net_factor = calc_lineup_net_rating(home_adj_net_damped, away_adj_net_damped)
+    # Append injury adjustment note to inputs_used
+    if _inj_note_home or _inj_note_away:
+        extra = ""
+        if _inj_note_home:
+            extra += f" | Home {_inj_note_home}"
+        if _inj_note_away:
+            extra += f" | Away {_inj_note_away}"
+        net_factor.inputs_used += extra
+    factors.append(net_factor)
     
     # Star Impact and Rotation Replacement (new tiered system)
     if home_players and away_players:
@@ -1312,7 +1392,13 @@ def score_game_v3(
             contribution=0.0,
             inputs_used="INACTIVE (no player data)",
         ))
-    factors.append(calc_off_vs_def(home_off, home_def, away_off, away_def))
+    factors.append(calc_off_vs_def(
+        home_off, home_def, away_off, away_def,
+        t1_creator_out_home=home_eff_adj.has_t1_creator_out,
+        t1_creator_out_away=away_eff_adj.has_t1_creator_out,
+        inj_note_home=_inj_note_home,
+        inj_note_away=_inj_note_away,
+    ))
     factors.append(calc_turnover_diff(home_tov, away_tov, home_tov_fb, away_tov_fb))
     # Combined shooting factor (replaces shot_quality + three_point_edge)
     factors.append(calc_shooting_advantage(
