@@ -130,6 +130,9 @@ class NBAPredictor(tk.Tk):
         # Load initial winrate stats from database
         self.after(250, self.refresh_stats_from_db)
         
+        # Load calibration on startup (non-blocking)
+        self.after(400, self._startup_calibration)
+        
         # Run dependency smoke check
         self.after(500, self._dependency_smoke_check)
     
@@ -601,6 +604,11 @@ class NBAPredictor(tk.Tk):
         self.log_frame = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.log_frame, text="  📝 Log  ")
         self.create_log_view()
+        
+        # Calibration tab
+        self.calibration_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.calibration_frame, text="  🎯 Calibration  ")
+        self.create_calibration_view()
     
     def create_predictions_tree(self):
         """Create the predictions treeview with confidence, totals, and lock status display."""
@@ -864,6 +872,87 @@ class NBAPredictor(tk.Tk):
         
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def create_calibration_view(self):
+        """Create the Calibration tab with reliability table and summary."""
+        container = tk.Frame(self.calibration_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Status bar
+        status_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        status_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        tk.Label(status_frame, text="Calibration Status:",
+                font=('Segoe UI', 10, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text']).pack(side=tk.LEFT)
+        
+        self.cal_status_var = tk.StringVar(value="Loading...")
+        tk.Label(status_frame, textvariable=self.cal_status_var,
+                font=('Segoe UI', 10),
+                bg=COLORS['card_bg'], fg=COLORS['primary']).pack(side=tk.LEFT, padx=(8, 0))
+        
+        # Refresh button
+        ttk.Button(
+            status_frame, text="Refresh",
+            command=lambda: self._force_calibration_refresh(),
+            style='Secondary.TButton'
+        ).pack(side=tk.RIGHT)
+        
+        # Summary line
+        self.cal_summary_var = tk.StringVar(value="No calibration data yet.")
+        tk.Label(container, textvariable=self.cal_summary_var,
+                font=('Segoe UI', 9),
+                bg=COLORS['card_bg'], fg=COLORS['text_muted'],
+                wraplength=800, justify=tk.LEFT).pack(fill=tk.X, padx=10, pady=(0, 8))
+        
+        # Bin table
+        tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        columns = ('bin', 'n', 'avg_conf', 'win_rate', 'brier')
+        self.cal_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
+        
+        col_configs = [
+            ('bin', 'Confidence Bin', 120),
+            ('n', 'Games', 70),
+            ('avg_conf', 'Avg Raw Conf', 100),
+            ('win_rate', 'Actual Win %', 100),
+            ('brier', 'Brier Score', 100),
+        ]
+        for col_id, heading, width in col_configs:
+            self.cal_tree.heading(col_id, text=heading)
+            self.cal_tree.column(col_id, width=width, anchor='center')
+        
+        cal_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.cal_tree.yview)
+        self.cal_tree.configure(yscrollcommand=cal_scroll.set)
+        self.cal_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cal_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Explanation
+        tk.Label(container,
+                text=("Reliability: each bin shows how often the model's confidence matched reality.\n"
+                      "Ideal: Win Rate matches Avg Raw Conf in every bin. Lower Brier = better."),
+                font=('Segoe UI', 9, 'italic'),
+                bg=COLORS['card_bg'], fg=COLORS['text_muted'],
+                justify=tk.LEFT).pack(fill=tk.X, padx=10, pady=(5, 10))
+    
+    def _force_calibration_refresh(self):
+        """Force calibration refresh from button click."""
+        def _do():
+            try:
+                from analysis.calibration import refresh_calibration
+                info = refresh_calibration(force=True)
+                if info.get("sample_size", 0) > 0:
+                    self.log(f"Calibration refreshed: {info.get('sample_size')} samples, "
+                             f"Brier={info.get('overall_brier')}")
+                else:
+                    self.log("Calibration: not enough graded games")
+                self.after(0, self.refresh_calibration_tab)
+            except Exception as e:
+                self.log(f"Calibration error: {e}")
+        
+        import threading
+        threading.Thread(target=_do, daemon=True).start()
     
     def create_roster_view(self):
         """Create the roster tab with team selector and player table."""
@@ -1998,6 +2087,81 @@ class NBAPredictor(tk.Tk):
             # Fall back to Excel if DB fails
             self.refresh_winrates()
     
+    def _startup_calibration(self):
+        """Load or refresh calibration mapping on startup."""
+        try:
+            from analysis.calibration import refresh_calibration
+            info = refresh_calibration(force=False)
+            if info.get("skipped"):
+                self.log(f"Calibration loaded ({info.get('sample_size', 0)} samples)")
+            elif info.get("sample_size", 0) >= 200:
+                self.log(f"Calibration refreshed: {info.get('sample_size')} samples, "
+                         f"Brier={info.get('overall_brier')}")
+            else:
+                self.log("Calibration: not enough graded games yet")
+            self.refresh_calibration_tab()
+        except Exception as e:
+            self.log(f"Calibration startup: {e}")
+    
+    def refresh_calibration_tab(self):
+        """Update calibration tab with current artefact data."""
+        try:
+            from analysis.calibration import load_calibration
+            artifact = load_calibration()
+            
+            # Clear existing tree rows
+            if hasattr(self, 'cal_tree'):
+                for item in self.cal_tree.get_children():
+                    self.cal_tree.delete(item)
+            
+            if artifact is None:
+                if hasattr(self, 'cal_summary_var'):
+                    self.cal_summary_var.set("No calibration data available yet.")
+                return
+            
+            # Update summary
+            n = artifact.get("sample_size", 0)
+            wr = artifact.get("overall_win_rate")
+            brier = artifact.get("overall_brier")
+            err = artifact.get("avg_abs_error")
+            method = artifact.get("method", "none")
+            gen = artifact.get("generated_at", "?")[:19]
+            
+            summary = (f"Samples: {n}  |  Win Rate: {wr}%  |  "
+                       f"Brier: {brier}  |  Avg Abs Error: {err}%  |  "
+                       f"Method: {method}  |  Updated: {gen}")
+            if hasattr(self, 'cal_summary_var'):
+                self.cal_summary_var.set(summary)
+            
+            # Populate bin table
+            if hasattr(self, 'cal_tree'):
+                for b in artifact.get("per_bin_stats", []):
+                    low = b.get("low", 0)
+                    high = b.get("high", 100)
+                    bn = b.get("n", 0)
+                    avg_c = b.get("avg_conf")
+                    win_r = b.get("win_rate")
+                    br = b.get("brier")
+                    
+                    self.cal_tree.insert('', 'end', values=(
+                        f"{low}-{high}%",
+                        bn,
+                        f"{avg_c:.1f}%" if avg_c is not None else "--",
+                        f"{win_r:.1f}%" if win_r is not None else "--",
+                        f"{br:.4f}" if br is not None else "--",
+                    ))
+            
+            # Calibration active indicator
+            if hasattr(self, 'cal_status_var'):
+                if n >= 200 and method != "none":
+                    self.cal_status_var.set("ACTIVE")
+                else:
+                    self.cal_status_var.set("INACTIVE (need >= 200 samples)")
+                    
+        except Exception as e:
+            if hasattr(self, 'cal_summary_var'):
+                self.cal_summary_var.set(f"Error loading calibration: {e}")
+    
     def toggle_auto_poll(self):
         """Toggle automatic score polling every 30 minutes."""
         if self.auto_poll_var.get():
@@ -2059,6 +2223,18 @@ class NBAPredictor(tk.Tk):
                 self.log(f"  Games updated: {games_updated}")
                 self.log(f"  Picks graded: {picks_graded}")
                 self.log(f"  Picks still pending: {picks_pending}")
+                
+                # Refresh calibration if we graded new games
+                if picks_graded > 0:
+                    try:
+                        from analysis.calibration import refresh_calibration
+                        cal_info = refresh_calibration(force=True)
+                        if not cal_info.get("skipped"):
+                            self.log(f"  Calibration updated: {cal_info.get('sample_size', 0)} samples, "
+                                     f"Brier={cal_info.get('overall_brier')}")
+                            self.after(0, self.refresh_calibration_tab)
+                    except Exception as ce:
+                        self.log(f"  Calibration refresh skipped: {ce}")
                 
                 # Refresh stats display
                 self.after(0, self.refresh_stats_from_db)
@@ -2499,6 +2675,31 @@ class NBAPredictor(tk.Tk):
             except IOError as e:
                 self.log(f"  Excel backup skipped: {e}")
                 # Don't fail the whole operation if Excel is locked
+            
+            # Apply calibration (if mapping available)
+            try:
+                from analysis.calibration import (
+                    get_active_mapping_fn, apply_calibration,
+                    compute_calibrated_bucket,
+                )
+                from storage.db import update_calibrated_confidence
+                cal_fn, is_cal = get_active_mapping_fn()
+                if is_cal and cal_fn:
+                    cal_count = 0
+                    for score in self.scores:
+                        game_id = getattr(score, 'game_id', '')
+                        if not game_id:
+                            continue
+                        conf_raw = score.confidence_pct_value
+                        conf_cal = apply_calibration(conf_raw, cal_fn)
+                        bucket_cal = compute_calibrated_bucket(conf_cal)
+                        update_calibrated_confidence(run_date, game_id, conf_cal, bucket_cal)
+                        cal_count += 1
+                    self.log(f"  Applied calibration to {cal_count} picks")
+                else:
+                    self.log("  Calibration not available (need >= 200 graded games)")
+            except Exception as e:
+                self.log(f"  Calibration application skipped: {e}")
             
             # Update UI
             self.after(0, self.update_predictions_display)
