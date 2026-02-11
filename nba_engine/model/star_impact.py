@@ -80,26 +80,37 @@ def status_multiplier(status: Optional[str]) -> float:
 
 def impact_metric(player) -> float:
     """
-    Calculate impact metric for a player.
-    
-    Impact = PPG + 0.7 * APG (if APG exists)
-    
+    Calculate box-score impact metric for a player.
+
+    Uses a multi-stat proxy that values defenders and bigs more fairly
+    than a PPG-only ranking:
+
+        impact = PTS + 1.5*AST + 1.2*REB + 2.0*STL + 2.0*BLK - 1.5*TOV
+
+    Falls back gracefully when STL/BLK/TOV are unavailable (defaults 0).
+
     Args:
-        player: Player object with ppg, apg (optional), mpg attributes
-    
+        player: Player object with per-game stat attributes
+
     Returns:
-        Impact score
+        Impact score (higher is better)
     """
     ppg = getattr(player, 'points_per_game', 0) or getattr(player, 'ppg', 0) or 0
     apg = getattr(player, 'assists_per_game', 0) or getattr(player, 'apg', 0) or 0
-    
+    rpg = getattr(player, 'rebounds_per_game', 0) or getattr(player, 'rpg', 0) or 0
+    spg = getattr(player, 'steals_per_game', 0) or 0
+    bpg = getattr(player, 'blocks_per_game', 0) or 0
+    topg = getattr(player, 'turnovers_per_game', 0) or 0
+
     if ppg == 0:
-        # Try alternate attribute names
         ppg = getattr(player, 'pts', 0) or 0
         if ppg == 0:
-            warnings.warn(f"Player {getattr(player, 'player_name', 'unknown')} has no PPG data", UserWarning)
-    
-    return ppg + 0.7 * apg
+            warnings.warn(
+                f"Player {getattr(player, 'player_name', 'unknown')} has no PPG data",
+                UserWarning,
+            )
+
+    return ppg + 1.5 * apg + 1.2 * rpg + 2.0 * spg + 2.0 * bpg - 1.5 * topg
 
 
 def select_star_tiers(players: list) -> dict:

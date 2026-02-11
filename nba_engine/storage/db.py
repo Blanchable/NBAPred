@@ -165,6 +165,18 @@ def init_db():
     except sqlite3.OperationalError:
         pass  # Column already exists
     
+    # Migration: add conf_pct_cal column to daily_picks for calibrated confidence
+    try:
+        cursor.execute("ALTER TABLE daily_picks ADD COLUMN conf_pct_cal REAL")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
+    # Migration: add bucket_cal column to daily_picks
+    try:
+        cursor.execute("ALTER TABLE daily_picks ADD COLUMN bucket_cal TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
     # Create daily_picks table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_picks (
@@ -896,6 +908,35 @@ def grade_daily_pick(slate_date: str, game_id: str, result: str):
         WHERE slate_date = ? AND game_id = ?
     """, (result, now, now, slate_date, game_id))
     
+    conn.commit()
+    conn.close()
+
+
+def update_calibrated_confidence(
+    slate_date: str,
+    game_id: str,
+    conf_pct_cal: float,
+    bucket_cal: str,
+):
+    """
+    Store calibrated confidence alongside the raw value.
+
+    This is called after predictions are generated when a calibration
+    mapping is available.
+
+    Args:
+        slate_date: Date in YYYY-MM-DD format
+        game_id: Game identifier
+        conf_pct_cal: Calibrated confidence percentage (50-95)
+        bucket_cal: Calibrated bucket ("HIGH"/"MEDIUM"/"LOW")
+    """
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE daily_picks
+        SET conf_pct_cal = ?, bucket_cal = ?
+        WHERE slate_date = ? AND game_id = ?
+    """, (conf_pct_cal, bucket_cal, slate_date, game_id))
     conn.commit()
     conn.close()
 

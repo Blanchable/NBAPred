@@ -1,0 +1,135 @@
+{
+  "generated_at": "2026-02-09T21:11:05.127513",
+  "lookback_days": 60,
+  "sample_size": 300,
+  "method": "bin_pav",
+  "bin_edges": [
+    50,
+    52,
+    55,
+    58,
+    62,
+    66,
+    70,
+    75,
+    80,
+    100
+  ],
+  "per_bin_stats": [
+    {
+      "low": 50,
+      "high": 52,
+      "n": 14,
+      "wins": 6,
+      "losses": 8,
+      "win_rate": 42.9,
+      "avg_conf": 50.6,
+      "brier": 0.25
+    },
+    {
+      "low": 52,
+      "high": 55,
+      "n": 30,
+      "wins": 20,
+      "losses": 10,
+      "win_rate": 66.7,
+      "avg_conf": 53.4,
+      "brier": 0.2394
+    },
+    {
+      "low": 55,
+      "high": 58,
+      "n": 22,
+      "wins": 11,
+      "losses": 11,
+      "win_rate": 50.0,
+      "avg_conf": 56.7,
+      "brier": 0.2537
+    },
+    {
+      "low": 58,
+      "high": 62,
+      "n": 40,
+      "wins": 16,
+      "losses": 24,
+      "win_rate": 40.0,
+      "avg_conf": 59.7,
+      "brier": 0.28
+    },
+    {
+      "low": 62,
+      "high": 66,
+      "n": 38,
+      "wins": 30,
+      "losses": 8,
+      "win_rate": 78.9,
+      "avg_conf": 64.4,
+      "brier": 0.1888
+    },
+    {
+      "low": 66,
+      "high": 70,
+      "n": 27,
+      "wins": 17,
+      "losses": 10,
+      "win_rate": 63.0,
+      "avg_conf": 68.0,
+      "brier": 0.2367
+    },
+    {
+      "low": 70,
+      "high": 75,
+      "n": 37,
+      "wins": 28,
+      "losses": 9,
+      "win_rate": 75.7,
+      "avg_conf": 72.6,
+      "brier": 0.184
+    },
+    {
+      "low": 75,
+      "high": 80,
+      "n": 50,
+      "wins": 40,
+      "losses": 10,
+      "win_rate": 80.0,
+      "avg_conf": 77.8,
+      "brier": 0.161
+    },
+    {
+      "low": 80,
+      "high": 100,
+      "n": 42,
+      "wins": 32,
+      "losses": 10,
+      "win_rate": 76.2,
+      "avg_conf": 82.6,
+      "brier": 0.1837
+    }
+  ],
+  "mapping_points": [
+    [
+      0.5059865108095439,
+      0.42857142857142855
+    ],
+    [
+      0.533783099593746,
+      0.5222222222222221
+    ],
+    [
+      0.5674740667774288,
+      0.7095516569200779
+    ],
+    [
+      0.5973681800956963,
+      0.7567567567567568
+    ],
+    [
+      0.6439069816535842,
+      0.780952380952381
+    ]
+  ],
+  "overall_brier": 0.212,
+  "overall_win_rate": 66.7,
+  "avg_abs_error": 8.7
+}

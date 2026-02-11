@@ -2,10 +2,13 @@
 Grading service for NBA Prediction Engine.
 
 Automatically grades picks based on final game scores.
-Respects locking - grades can be applied regardless of lock status.
+Supports **backfill grading** across multiple past dates so that games
+from previous days are scored after midnight (the core fix).
+
+Respects locking — grades can be applied regardless of lock status.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 
 from storage.db import (
@@ -19,7 +22,12 @@ from storage.db import (
     get_now_local,
     get_today_date_local,
 )
-from .scores import fetch_scores_for_date, GameScoreUpdate
+from .scores import (
+    fetch_scores_for_date,
+    fetch_scores_for_past_date,
+    GameScoreUpdate,
+    SCORE_BACKFILL_DAYS,
+)
 
 
 def update_games_from_scores(scores: List[GameScoreUpdate]) -> int:
@@ -49,10 +57,59 @@ def update_games_from_scores(scores: List[GameScoreUpdate]) -> int:
     return updated
 
 
+def _grade_ungraded_from_scores(
+    ungraded_picks: List[dict],
+    score_map: dict,
+) -> Tuple[int, int]:
+    """
+    Grade a list of ungraded picks using a pre-built score_map.
+
+    Returns:
+        Tuple of (picks_graded, picks_still_pending)
+    """
+    graded = 0
+    pending = 0
+
+    for pick in ungraded_picks:
+        game_id = pick['game_id']
+        pick_side = pick['pick_side']
+        slate_date = pick['slate_date']
+
+        # Try API scores first
+        score_update = score_map.get(game_id)
+
+        winner_side = None
+        if score_update and score_update.is_final:
+            winner_side = score_update.get_winner_side()
+        elif (pick.get('status') == 'final'
+              and pick.get('away_score') is not None
+              and pick.get('home_score') is not None):
+            # Fall back to DB data (already written by update_games_from_scores)
+            if pick['home_score'] > pick['away_score']:
+                winner_side = "HOME"
+            elif pick['away_score'] > pick['home_score']:
+                winner_side = "AWAY"
+
+        if winner_side is None:
+            pending += 1
+            continue
+
+        result = "W" if pick_side == winner_side else "L"
+        grade_daily_pick(slate_date, game_id, result)
+        graded += 1
+
+        matchup = pick.get('matchup',
+                           f"{pick.get('away_team', '?')} @ {pick.get('home_team', '?')}")
+        print(f"    {matchup}: {pick['pick_team']} ({pick_side}) -> {result}")
+
+    return graded, pending
+
+
 def grade_picks_for_date(date_str: Optional[str] = None) -> Tuple[int, int, int]:
     """
     Grade all ungraded picks for a specific date.
     
+    Uses the live scoreboard for today and ScoreboardV2 for past dates.
     Also locks any games that have started.
     
     Args:
@@ -65,139 +122,113 @@ def grade_picks_for_date(date_str: Optional[str] = None) -> Tuple[int, int, int]
         date_str = get_today_date_local()
     
     now_local = get_now_local()
+    today = get_today_date_local()
+
     print(f"Grading picks for {date_str}...")
     
-    # Fetch latest scores
-    scores = fetch_scores_for_date(date_str)
+    # Fetch scores — live for today, ScoreboardV2 for past dates
+    if date_str == today:
+        scores = fetch_scores_for_date(date_str)
+    else:
+        scores = fetch_scores_for_past_date(date_str)
     print(f"  Fetched {len(scores)} games from API")
     
-    # Update game records
+    # Update game records in DB
     games_updated = update_games_from_scores(scores)
     print(f"  Updated {games_updated} game records")
     
-    # Lock any games that have started
-    locked_count = lock_all_started_games(date_str, now_local)
-    if locked_count > 0:
-        print(f"  Locked {locked_count} started games")
+    # Lock any games that have started (only meaningful for today)
+    if date_str == today:
+        locked_count = lock_all_started_games(date_str, now_local)
+        if locked_count > 0:
+            print(f"  Locked {locked_count} started games")
     
     # Build score lookup by game_id
     score_map = {s.game_id: s for s in scores}
     
-    # Get all picks for this date (including already graded for status check)
+    # Get ungraded picks for this date
     all_picks = get_daily_picks(date_str)
     ungraded = [p for p in all_picks if p.get('result') == 'PENDING']
     print(f"  Found {len(ungraded)} ungraded picks")
     
-    picks_graded = 0
-    picks_pending = 0
-    
-    for pick in ungraded:
-        game_id = pick['game_id']
-        pick_side = pick['pick_side']
-        slate_date = pick['slate_date']
-        
-        # Get score info - first try our fetched scores
-        score_update = score_map.get(game_id)
-        
-        if score_update and score_update.is_final:
-            # Use API data
-            winner_side = score_update.get_winner_side()
-            away_score = score_update.away_score
-            home_score = score_update.home_score
-        elif pick.get('status') == 'final' and pick.get('away_score') is not None and pick.get('home_score') is not None:
-            # Use database data
-            away_score = pick['away_score']
-            home_score = pick['home_score']
-            if home_score > away_score:
-                winner_side = "HOME"
-            elif away_score > home_score:
-                winner_side = "AWAY"
-            else:
-                winner_side = None  # Tie
-        else:
-            # Game not final yet
-            picks_pending += 1
-            continue
-        
-        if winner_side is None:
-            # Tie or unknown - leave pending
-            picks_pending += 1
-            continue
-        
-        # Determine if pick was correct
-        if pick_side == winner_side:
-            result = "W"
-        else:
-            result = "L"
-        
-        grade_daily_pick(slate_date, game_id, result)
-        picks_graded += 1
-        
-        matchup = pick.get('matchup', f"{pick.get('away_team', '?')} @ {pick.get('home_team', '?')}")
-        print(f"    {matchup}: {pick['pick_team']} ({pick_side}) -> {result}")
+    picks_graded, picks_pending = _grade_ungraded_from_scores(ungraded, score_map)
     
     print(f"  Graded: {picks_graded}, Pending: {picks_pending}")
-    
     return games_updated, picks_graded, picks_pending
 
 
-def grade_all_pending() -> Tuple[int, int, int]:
+def grade_all_pending(
+    backfill_days: int = SCORE_BACKFILL_DAYS,
+) -> Tuple[int, int, int]:
     """
-    Grade all pending picks across all dates.
-    
-    Fetches scores for today (live API only shows today) and grades
-    any matching pending picks.
-    
+    Grade all pending picks within the backfill window.
+
+    For each unique slate date with ungraded picks (up to ``backfill_days``
+    ago), fetches scores from the appropriate API and grades them.
+
+    This is the **core backfill fix**: previous versions only graded
+    today's date, leaving yesterday's picks permanently ungraded after
+    midnight.
+
     Returns:
-        Tuple of (games_updated, picks_graded, picks_pending)
+        Tuple of (total_games_updated, total_picks_graded, total_picks_pending)
     """
     today = get_today_date_local()
-    
-    # Get all ungraded picks
+    today_dt = datetime.strptime(today, "%Y-%m-%d").date()
+    cutoff = (today_dt - timedelta(days=backfill_days)).strftime("%Y-%m-%d")
+
+    # Get ALL ungraded picks (no date filter)
     all_ungraded = get_ungraded_daily_picks()
-    print(f"Found {len(all_ungraded)} total pending picks")
-    
-    # Group by date
-    picks_by_date = {}
+
+    # Apply backfill-window filter
+    all_ungraded = [p for p in all_ungraded
+                    if p.get('slate_date', '') >= cutoff]
+
+    if not all_ungraded:
+        print("No ungraded picks in backfill window.")
+        return 0, 0, 0
+
+    # Group by slate_date
+    picks_by_date: dict[str, list] = {}
     for pick in all_ungraded:
-        slate_date = pick.get('slate_date')
-        if slate_date:
-            if slate_date not in picks_by_date:
-                picks_by_date[slate_date] = []
-            picks_by_date[slate_date].append(pick)
-    
+        d = pick['slate_date']
+        picks_by_date.setdefault(d, []).append(pick)
+
+    dates_to_check = sorted(picks_by_date.keys())
+    print(f"Grading backfill window: last {backfill_days} days (cutoff {cutoff})")
+    print(f"Found {len(all_ungraded)} ungraded games across {len(dates_to_check)} dates")
+
     total_updated = 0
     total_graded = 0
     total_pending = 0
-    
-    # Process each date
-    for date_str, picks in picks_by_date.items():
+
+    for date_str in dates_to_check:
+        picks = picks_by_date[date_str]
         print(f"\nProcessing {date_str} ({len(picks)} picks)...")
-        
+
+        # Fetch scores for this date (live for today, historical otherwise)
         if date_str == today:
-            # Fetch fresh scores for today
-            updated, graded, pending = grade_picks_for_date(date_str)
-            total_updated += updated
-            total_graded += graded
-            total_pending += pending
+            scores = fetch_scores_for_date(date_str)
         else:
-            # For past dates, check if game data in DB has scores
-            for pick in picks:
-                if pick.get('status') == 'final' and pick.get('away_score') is not None and pick.get('home_score') is not None:
-                    pick_side = pick['pick_side']
-                    
-                    if pick['home_score'] > pick['away_score']:
-                        winner_side = "HOME"
-                    elif pick['away_score'] > pick['home_score']:
-                        winner_side = "AWAY"
-                    else:
-                        total_pending += 1
-                        continue  # Tie
-                    
-                    result = "W" if pick_side == winner_side else "L"
-                    grade_daily_pick(pick['slate_date'], pick['game_id'], result)
-                    total_graded += 1
-                else:
-                    total_pending += 1
-    
+            scores = fetch_scores_for_past_date(date_str)
+
+        # Update game records in DB
+        games_updated = update_games_from_scores(scores)
+        total_updated += games_updated
+
+        # Build score lookup
+        score_map = {s.game_id: s for s in scores}
+
+        # Re-fetch picks from DB (scores may have just been written)
+        fresh_picks = get_daily_picks(date_str)
+        fresh_ungraded = [p for p in fresh_picks if p.get('result') == 'PENDING']
+
+        graded, pending = _grade_ungraded_from_scores(fresh_ungraded, score_map)
+        total_graded += graded
+        total_pending += pending
+
+        print(f"  Graded: {graded}, Pending: {pending}")
+
+    print(f"\nBackfill complete: updated {total_updated} games, "
+          f"graded {total_graded} picks, {total_pending} still pending")
     return total_updated, total_graded, total_pending

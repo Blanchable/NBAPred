@@ -67,16 +67,16 @@ class TestStatusMultiplier:
 
 
 class TestImpactMetric:
-    """Tests for impact_metric function."""
+    """Tests for impact_metric function (box-impact proxy)."""
     
     def test_ppg_and_apg(self):
-        """Impact should be PPG + 0.7 * APG"""
+        """Impact should be PTS + 1.5*AST + 1.2*REB + 2*STL + 2*BLK - 1.5*TOV"""
         player = MockPlayer("Test", points_per_game=25.0, assists_per_game=10.0, minutes_per_game=35.0)
-        # 25 + 0.7 * 10 = 32.0
-        assert impact_metric(player) == 32.0
+        # 25 + 1.5*10 + 1.2*0 + 2*0 + 2*0 - 1.5*0 = 40.0
+        assert impact_metric(player) == 40.0
     
     def test_ppg_only(self):
-        """When APG is 0, impact should be just PPG"""
+        """When APG is 0, impact should be just PPG (other stats default 0)"""
         player = MockPlayer("Test", points_per_game=20.0, assists_per_game=0.0, minutes_per_game=30.0)
         assert impact_metric(player) == 20.0
 

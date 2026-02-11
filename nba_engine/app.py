@@ -59,6 +59,7 @@ from services import (
     fetch_scores_for_date,
     grade_picks_for_date,
 )
+from services.grading import grade_all_pending
 
 
 # Try to use ttkbootstrap for modern styling, fallback to plain ttk
@@ -128,6 +129,9 @@ class NBAPredictor(tk.Tk):
         
         # Load initial winrate stats from database
         self.after(250, self.refresh_stats_from_db)
+        
+        # Load calibration on startup (non-blocking)
+        self.after(400, self._startup_calibration)
         
         # Run dependency smoke check
         self.after(500, self._dependency_smoke_check)
@@ -355,7 +359,7 @@ class NBAPredictor(tk.Tk):
         
         self.check_scores_button = ttk.Button(
             right_frame,
-            text="📊 Check Scores",
+            text="📊 Check / Backfill Scores",
             command=self.check_scores,
             style='Secondary.TButton'
         )
@@ -600,6 +604,11 @@ class NBAPredictor(tk.Tk):
         self.log_frame = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.log_frame, text="  📝 Log  ")
         self.create_log_view()
+        
+        # Calibration tab
+        self.calibration_frame = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.calibration_frame, text="  🎯 Calibration  ")
+        self.create_calibration_view()
     
     def create_predictions_tree(self):
         """Create the predictions treeview with confidence, totals, and lock status display."""
@@ -609,6 +618,7 @@ class NBAPredictor(tk.Tk):
         
         columns = (
             'matchup', 'pick', 'side', 'conf_pct', 'bucket', 'locked',
+            'fair_spread', 'min_ev', 'sigma',
             'pred_score', 'total', 'total_range', 'edge', 'margin'
         )
         
@@ -626,12 +636,15 @@ class NBAPredictor(tk.Tk):
             ('side', 'Side', 55),
             ('conf_pct', 'Conf %', 65),
             ('bucket', 'Bucket', 65),
-            ('locked', 'Locked', 55),
-            ('pred_score', 'Pred Score', 95),
+            ('locked', 'Locked', 50),
+            ('fair_spread', 'Fair Line', 95),
+            ('min_ev', 'Min +EV (-110)', 115),
+            ('sigma', 'σ', 40),
+            ('pred_score', 'Pred Score', 90),
             ('total', 'Total', 50),
-            ('total_range', 'Range', 75),
-            ('edge', 'Edge', 55),
-            ('margin', 'Margin', 60),
+            ('total_range', 'Range', 70),
+            ('edge', 'Edge', 50),
+            ('margin', 'Margin', 55),
         ]
         
         for col_id, heading, width in col_configs:
@@ -653,6 +666,30 @@ class NBAPredictor(tk.Tk):
         self.pred_tree.tag_configure('medium', background='#fff3cd')
         self.pred_tree.tag_configure('low', background='#f8d7da')
         self.pred_tree.tag_configure('locked', foreground='#666666')
+        
+        # ── EV Checker panel (below the predictions tree) ─────────
+        ev_frame = tk.Frame(self.predictions_frame, bg=COLORS['card_bg'])
+        ev_frame.pack(fill=tk.X, padx=5, pady=(2, 5))
+        
+        tk.Label(ev_frame, text="EV Check:", font=('Segoe UI', 9, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text']).pack(side=tk.LEFT, padx=(10, 5))
+        
+        tk.Label(ev_frame, text="Book spread (HOME line):",
+                font=('Segoe UI', 9), bg=COLORS['card_bg'],
+                fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        
+        self.ev_spread_var = tk.StringVar(value="-5.5")
+        ev_entry = ttk.Entry(ev_frame, textvariable=self.ev_spread_var, width=7,
+                            font=('Segoe UI', 9))
+        ev_entry.pack(side=tk.LEFT, padx=3)
+        
+        ttk.Button(ev_frame, text="Check", command=self._check_ev,
+                  style='Secondary.TButton').pack(side=tk.LEFT, padx=3)
+        
+        self.ev_result_var = tk.StringVar(value="Select a game, enter spread, press Check")
+        tk.Label(ev_frame, textvariable=self.ev_result_var,
+                font=('Segoe UI', 9), bg=COLORS['card_bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(10, 0))
     
     def create_factors_view(self):
         """Create the factor breakdown view with confidence summary."""
@@ -752,6 +789,24 @@ class NBAPredictor(tk.Tk):
                 font=('Segoe UI', 10), bg=COLORS['bg'],
                 fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
         
+        # Instability / recency info bar
+        instab_bar = tk.Frame(container, bg=COLORS['bg'], padx=10, pady=5)
+        instab_bar.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        tk.Label(instab_bar, text="Roster Instability:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_instab_var = tk.StringVar(value="--")
+        tk.Label(instab_bar, textvariable=self.factor_instab_var,
+                font=('Segoe UI', 9), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 20))
+
+        tk.Label(instab_bar, text="Recency Weight:", font=('Segoe UI', 9),
+                bg=COLORS['bg'], fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        self.factor_recency_var = tk.StringVar(value="--")
+        tk.Label(instab_bar, textvariable=self.factor_recency_var,
+                font=('Segoe UI', 9), bg=COLORS['bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(5, 0))
+
         # Factors tree
         tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -845,6 +900,87 @@ class NBAPredictor(tk.Tk):
         
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def create_calibration_view(self):
+        """Create the Calibration tab with reliability table and summary."""
+        container = tk.Frame(self.calibration_frame, bg=COLORS['card_bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Status bar
+        status_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        status_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        tk.Label(status_frame, text="Calibration Status:",
+                font=('Segoe UI', 10, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text']).pack(side=tk.LEFT)
+        
+        self.cal_status_var = tk.StringVar(value="Loading...")
+        tk.Label(status_frame, textvariable=self.cal_status_var,
+                font=('Segoe UI', 10),
+                bg=COLORS['card_bg'], fg=COLORS['primary']).pack(side=tk.LEFT, padx=(8, 0))
+        
+        # Refresh button
+        ttk.Button(
+            status_frame, text="Refresh",
+            command=lambda: self._force_calibration_refresh(),
+            style='Secondary.TButton'
+        ).pack(side=tk.RIGHT)
+        
+        # Summary line
+        self.cal_summary_var = tk.StringVar(value="No calibration data yet.")
+        tk.Label(container, textvariable=self.cal_summary_var,
+                font=('Segoe UI', 9),
+                bg=COLORS['card_bg'], fg=COLORS['text_muted'],
+                wraplength=800, justify=tk.LEFT).pack(fill=tk.X, padx=10, pady=(0, 8))
+        
+        # Bin table
+        tree_frame = tk.Frame(container, bg=COLORS['card_bg'])
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        columns = ('bin', 'n', 'avg_conf', 'win_rate', 'brier')
+        self.cal_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
+        
+        col_configs = [
+            ('bin', 'Confidence Bin', 120),
+            ('n', 'Games', 70),
+            ('avg_conf', 'Avg Raw Conf', 100),
+            ('win_rate', 'Actual Win %', 100),
+            ('brier', 'Brier Score', 100),
+        ]
+        for col_id, heading, width in col_configs:
+            self.cal_tree.heading(col_id, text=heading)
+            self.cal_tree.column(col_id, width=width, anchor='center')
+        
+        cal_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.cal_tree.yview)
+        self.cal_tree.configure(yscrollcommand=cal_scroll.set)
+        self.cal_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cal_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Explanation
+        tk.Label(container,
+                text=("Reliability: each bin shows how often the model's confidence matched reality.\n"
+                      "Ideal: Win Rate matches Avg Raw Conf in every bin. Lower Brier = better."),
+                font=('Segoe UI', 9, 'italic'),
+                bg=COLORS['card_bg'], fg=COLORS['text_muted'],
+                justify=tk.LEFT).pack(fill=tk.X, padx=10, pady=(5, 10))
+    
+    def _force_calibration_refresh(self):
+        """Force calibration refresh from button click."""
+        def _do():
+            try:
+                from analysis.calibration import refresh_calibration
+                info = refresh_calibration(force=True)
+                if info.get("sample_size", 0) > 0:
+                    self.log(f"Calibration refreshed: {info.get('sample_size')} samples, "
+                             f"Brier={info.get('overall_brier')}")
+                else:
+                    self.log("Calibration: not enough graded games")
+                self.after(0, self.refresh_calibration_tab)
+            except Exception as e:
+                self.log(f"Calibration error: {e}")
+        
+        import threading
+        threading.Thread(target=_do, daemon=True).start()
     
     def create_roster_view(self):
         """Create the roster tab with team selector and player table."""
@@ -1130,21 +1266,30 @@ class NBAPredictor(tk.Tk):
                 
                 season = get_current_season()
                 
-                # Fetch today's games (cache it)
-                if self.todays_games_cache is None:
-                    games, _, _ = get_todays_games()
-                    self.todays_games_cache = games
+                # ── Phase 1: roster + schedule + injuries (fast) ──────
                 
-                # Ensure player stats cache exists
-                if self.player_stats_cache is None:
-                    self.player_stats_cache = get_player_stats(season=season)
-                
-                # Fetch roster for the selected team (use cache if available)
+                # Fetch roster FIRST — this is the critical data
                 if team_abbrev not in self.roster_cache:
                     roster = get_team_roster(team_abbrev, season=season)
                     self.roster_cache[team_abbrev] = roster
                 else:
                     roster = self.roster_cache[team_abbrev]
+                
+                if not roster:
+                    ta = team_abbrev
+                    self.after(0, lambda: self._roster_load_error(
+                        f"No roster data returned for {ta}. "
+                        "The NBA API may be temporarily unavailable — try again in a moment."
+                    ))
+                    return
+                
+                # Fetch today's games (cache it)
+                if self.todays_games_cache is None:
+                    try:
+                        games, _, _ = get_todays_games()
+                        self.todays_games_cache = games
+                    except Exception:
+                        self.todays_games_cache = []
                 
                 # Fetch injury report if needed
                 if not self.injury_rows_cache:
@@ -1164,13 +1309,6 @@ class NBAPredictor(tk.Tk):
                     status = row.get_canonical_status() if hasattr(row, 'get_canonical_status') else row.status
                     injury_map[key] = status
                 
-                # Get player impacts for this team
-                impacts = self.player_stats_cache.get(team_abbrev, [])
-                stats_map = {}
-                for impact in impacts:
-                    name_norm = normalize_player_name(impact.player_name)
-                    stats_map[name_norm] = impact
-                
                 # Determine if team plays tonight
                 tonight_game = None
                 if self.todays_games_cache:
@@ -1179,103 +1317,63 @@ class NBAPredictor(tk.Tk):
                             tonight_game = game
                             break
                 
-                # Build tonight summary
                 if tonight_game:
                     if tonight_game.home_team == team_abbrev:
-                        opponent = tonight_game.away_team
-                        tonight_summary = f"Tonight: vs {opponent} (Home)"
+                        tonight_summary = f"Tonight: vs {tonight_game.away_team} (Home)"
                     else:
-                        opponent = tonight_game.home_team
-                        tonight_summary = f"Tonight: @ {opponent} (Away)"
+                        tonight_summary = f"Tonight: @ {tonight_game.home_team} (Away)"
                 else:
                     tonight_summary = "No game today"
                 
-                # Build row data
-                rows = []
-                for player in roster:
-                    name_norm = normalize_player_name(player.player_name)
-                    impact = stats_map.get(name_norm)
-                    
-                    # Get stats
-                    if impact:
-                        mpg = f"{impact.minutes_per_game:.1f}"
-                        ppg = f"{impact.points_per_game:.1f}"
-                        rpg = f"{impact.rebounds_per_game:.1f}"
-                        apg = f"{impact.assists_per_game:.1f}"
-                        fg_pct = f"{impact.fg_pct:.1f}"
-                        fg3_pct = f"{impact.fg3_pct:.1f}"
-                        usg = f"{impact.usage_pct:.1f}"
-                        
-                        # Determine role
-                        if impact.is_star:
-                            role = "Star"
-                        elif impact.is_key_player:
-                            role = "Key"
-                        elif impact.minutes_per_game >= 15:
-                            role = "Rotation"
-                        else:
-                            role = "Bench"
-                    else:
-                        mpg = ppg = rpg = apg = fg_pct = fg3_pct = usg = "--"
-                        role = "Bench"
-                    
-                    # Determine status
-                    injury_key = (team_abbrev, name_norm)
-                    status = injury_map.get(injury_key, "Available")
-                    if status.upper() in ("AVAILABLE", ""):
-                        status = "Available"
-                    
-                    # Determine tonight
-                    if not tonight_game:
-                        tonight = "N/A"
-                    elif status.upper() in ("OUT", "DOUBTFUL"):
-                        tonight = "No"
-                    elif status.upper() == "QUESTIONABLE":
-                        tonight = "Maybe"
-                    else:
-                        tonight = "Yes"
-                    
-                    # Determine tags for highlighting
-                    tags = []
-                    status_upper = status.upper()
-                    if status_upper == "OUT":
-                        tags.append('out')
-                    elif status_upper == "DOUBTFUL":
-                        tags.append('doubtful')
-                    elif status_upper == "QUESTIONABLE":
-                        tags.append('questionable')
-                    elif status_upper == "PROBABLE":
-                        tags.append('probable')
-                    
-                    if impact:
-                        if impact.is_star:
-                            tags.append('star')
-                        elif impact.is_key_player:
-                            tags.append('key')
-                    
-                    row_data = {
-                        'name': player.player_name,
-                        'pos': player.position or "--",
-                        'role': role,
-                        'status': status,
-                        'tonight': tonight,
-                        'mpg': mpg,
-                        'ppg': ppg,
-                        'rpg': rpg,
-                        'apg': apg,
-                        'fg_pct': fg_pct,
-                        'fg3_pct': fg3_pct,
-                        'usg': usg,
-                        'tags': tuple(tags),
-                    }
-                    rows.append(row_data)
+                # Build stats maps from whatever is already cached (may be empty)
+                stats_map = {}
+                stats_by_id = {}
+                need_stats_fetch = self.player_stats_cache is None
+                if self.player_stats_cache:
+                    for impact in self.player_stats_cache.get(team_abbrev, []):
+                        stats_map[normalize_player_name(impact.player_name)] = impact
+                        pid = getattr(impact, 'player_id', 0) or 0
+                        if pid:
+                            stats_by_id[pid] = impact
                 
-                # Sort: stars first, then by role, then by name
-                role_order = {'Star': 0, 'Key': 1, 'Rotation': 2, 'Bench': 3}
-                rows.sort(key=lambda r: (role_order.get(r['role'], 4), r['name']))
+                # Render roster immediately with whatever data is available
+                rows = self._build_roster_row_data(
+                    roster, stats_map, injury_map, tonight_game, team_abbrev,
+                    stats_by_id=stats_by_id,
+                )
+                ts = tonight_summary
+                self.after(0, lambda: self._render_roster_rows(rows, ts))
                 
-                # Update UI from main thread
-                self.after(0, lambda: self._render_roster_rows(rows, tonight_summary))
+                # ── Phase 2: player-stats enrichment (may be slow) ────
+                if need_stats_fetch:
+                    self.after(0, lambda: self.log("  Loading player stats for enrichment..."))
+                    try:
+                        self.player_stats_cache = get_player_stats(season=season)
+                    except Exception as ps_err:
+                        print(f"  ⚠ Player stats fetch failed: {ps_err}")
+                        self.player_stats_cache = {}
+                    
+                    # Re-render with stats enrichment if we got data
+                    new_impacts = self.player_stats_cache.get(team_abbrev, [])
+                    if new_impacts:
+                        stats_map = {}
+                        stats_by_id = {}
+                        for impact in new_impacts:
+                            stats_map[normalize_player_name(impact.player_name)] = impact
+                            pid = getattr(impact, 'player_id', 0) or 0
+                            if pid:
+                                stats_by_id[pid] = impact
+                        rows = self._build_roster_row_data(
+                            roster, stats_map, injury_map, tonight_game, team_abbrev,
+                            stats_by_id=stats_by_id,
+                        )
+                        self.after(0, lambda: self._render_roster_rows(rows, ts))
+                        self.after(0, lambda: self.log("  Player stats loaded — roster enriched."))
+                    else:
+                        ta = team_abbrev
+                        self.after(0, lambda: self.log(
+                            f"  ⚠ No player stats for {ta} — roster shown without stat enrichment."
+                        ))
                 
             except Exception as e:
                 import traceback
@@ -1308,6 +1406,106 @@ class NBAPredictor(tk.Tk):
         
         self.log(f"  Loaded {len(rows)} players for {self.roster_team_var.get()}")
     
+    def _build_roster_row_data(self, roster, stats_map, injury_map, tonight_game, team_abbrev, stats_by_id=None):
+        """Build row data dicts for the roster treeview.
+
+        Extracted so it can be called twice: once for an immediate render
+        (possibly without stats) and again after stats arrive.
+
+        Uses player_id for joining when available, falls back to name.
+        """
+        from ingest.availability import normalize_player_name
+
+        if stats_by_id is None:
+            stats_by_id = {}
+
+        rows = []
+        for player in roster:
+            name_norm = normalize_player_name(player.player_name)
+            # Prefer player_id join, fall back to normalized name
+            pid = getattr(player, 'player_id', 0) or 0
+            impact = stats_by_id.get(pid) if pid else None
+            if impact is None:
+                impact = stats_map.get(name_norm)
+
+            # Get stats
+            if impact:
+                mpg = f"{impact.minutes_per_game:.1f}"
+                ppg = f"{impact.points_per_game:.1f}"
+                rpg = f"{impact.rebounds_per_game:.1f}"
+                apg = f"{impact.assists_per_game:.1f}"
+                fg_pct = f"{impact.fg_pct:.1f}"
+                fg3_pct = f"{impact.fg3_pct:.1f}"
+                usg = f"{impact.usage_pct:.1f}"
+
+                if impact.is_star:
+                    role = "Star"
+                elif impact.is_key_player:
+                    role = "Key"
+                elif impact.minutes_per_game >= 15:
+                    role = "Rotation"
+                else:
+                    role = "Bench"
+            else:
+                mpg = ppg = rpg = apg = fg_pct = fg3_pct = usg = "--"
+                role = "Bench"
+
+            # Determine status
+            injury_key = (team_abbrev, name_norm)
+            status = injury_map.get(injury_key, "Available")
+            if status.upper() in ("AVAILABLE", ""):
+                status = "Available"
+
+            # Determine tonight
+            if not tonight_game:
+                tonight = "N/A"
+            elif status.upper() in ("OUT", "DOUBTFUL"):
+                tonight = "No"
+            elif status.upper() == "QUESTIONABLE":
+                tonight = "Maybe"
+            else:
+                tonight = "Yes"
+
+            # Determine tags for highlighting
+            tags = []
+            status_upper = status.upper()
+            if status_upper == "OUT":
+                tags.append('out')
+            elif status_upper == "DOUBTFUL":
+                tags.append('doubtful')
+            elif status_upper == "QUESTIONABLE":
+                tags.append('questionable')
+            elif status_upper == "PROBABLE":
+                tags.append('probable')
+
+            if impact:
+                if impact.is_star:
+                    tags.append('star')
+                elif impact.is_key_player:
+                    tags.append('key')
+
+            row_data = {
+                'name': player.player_name,
+                'pos': player.position or "--",
+                'role': role,
+                'status': status,
+                'tonight': tonight,
+                'mpg': mpg,
+                'ppg': ppg,
+                'rpg': rpg,
+                'apg': apg,
+                'fg_pct': fg_pct,
+                'fg3_pct': fg3_pct,
+                'usg': usg,
+                'tags': tuple(tags),
+            }
+            rows.append(row_data)
+
+        # Sort: stars first, then by role, then by name
+        role_order = {'Star': 0, 'Key': 1, 'Rotation': 2, 'Bench': 3}
+        rows.sort(key=lambda r: (role_order.get(r['role'], 4), r['name']))
+        return rows
+
     def _roster_load_error(self, error_msg: str):
         """Handle roster load error with popup notification."""
         self.roster_loading = False
@@ -1646,9 +1844,13 @@ class NBAPredictor(tk.Tk):
                 
                 self.after(0, lambda: self._update_proj_game_dropdown(game_displays))
                 
-                # Ensure player stats cache exists
+                # Ensure player stats cache exists (non-fatal if it fails)
                 if self.player_stats_cache is None:
-                    self.player_stats_cache = get_player_stats(season=season)
+                    try:
+                        self.player_stats_cache = get_player_stats(season=season)
+                    except Exception as ps_err:
+                        print(f"  ⚠ Player stats fetch failed: {ps_err}")
+                        self.player_stats_cache = {}
                 
                 # Ensure team stats cache exists
                 if self.team_stats_cache is None:
@@ -1913,6 +2115,81 @@ class NBAPredictor(tk.Tk):
             # Fall back to Excel if DB fails
             self.refresh_winrates()
     
+    def _startup_calibration(self):
+        """Load or refresh calibration mapping on startup."""
+        try:
+            from analysis.calibration import refresh_calibration
+            info = refresh_calibration(force=False)
+            if info.get("skipped"):
+                self.log(f"Calibration loaded ({info.get('sample_size', 0)} samples)")
+            elif info.get("sample_size", 0) >= 200:
+                self.log(f"Calibration refreshed: {info.get('sample_size')} samples, "
+                         f"Brier={info.get('overall_brier')}")
+            else:
+                self.log("Calibration: not enough graded games yet")
+            self.refresh_calibration_tab()
+        except Exception as e:
+            self.log(f"Calibration startup: {e}")
+    
+    def refresh_calibration_tab(self):
+        """Update calibration tab with current artefact data."""
+        try:
+            from analysis.calibration import load_calibration
+            artifact = load_calibration()
+            
+            # Clear existing tree rows
+            if hasattr(self, 'cal_tree'):
+                for item in self.cal_tree.get_children():
+                    self.cal_tree.delete(item)
+            
+            if artifact is None:
+                if hasattr(self, 'cal_summary_var'):
+                    self.cal_summary_var.set("No calibration data available yet.")
+                return
+            
+            # Update summary
+            n = artifact.get("sample_size", 0)
+            wr = artifact.get("overall_win_rate")
+            brier = artifact.get("overall_brier")
+            err = artifact.get("avg_abs_error")
+            method = artifact.get("method", "none")
+            gen = artifact.get("generated_at", "?")[:19]
+            
+            summary = (f"Samples: {n}  |  Win Rate: {wr}%  |  "
+                       f"Brier: {brier}  |  Avg Abs Error: {err}%  |  "
+                       f"Method: {method}  |  Updated: {gen}")
+            if hasattr(self, 'cal_summary_var'):
+                self.cal_summary_var.set(summary)
+            
+            # Populate bin table
+            if hasattr(self, 'cal_tree'):
+                for b in artifact.get("per_bin_stats", []):
+                    low = b.get("low", 0)
+                    high = b.get("high", 100)
+                    bn = b.get("n", 0)
+                    avg_c = b.get("avg_conf")
+                    win_r = b.get("win_rate")
+                    br = b.get("brier")
+                    
+                    self.cal_tree.insert('', 'end', values=(
+                        f"{low}-{high}%",
+                        bn,
+                        f"{avg_c:.1f}%" if avg_c is not None else "--",
+                        f"{win_r:.1f}%" if win_r is not None else "--",
+                        f"{br:.4f}" if br is not None else "--",
+                    ))
+            
+            # Calibration active indicator
+            if hasattr(self, 'cal_status_var'):
+                if n >= 200 and method != "none":
+                    self.cal_status_var.set("ACTIVE")
+                else:
+                    self.cal_status_var.set("INACTIVE (need >= 200 samples)")
+                    
+        except Exception as e:
+            if hasattr(self, 'cal_summary_var'):
+                self.cal_summary_var.set(f"Error loading calibration: {e}")
+    
     def toggle_auto_poll(self):
         """Toggle automatic score polling every 30 minutes."""
         if self.auto_poll_var.get():
@@ -1936,22 +2213,15 @@ class NBAPredictor(tk.Tk):
         self.auto_poll_job = self.after(poll_interval_ms, self.auto_check_scores)
     
     def auto_check_scores(self):
-        """Automatically check scores (called by timer)."""
+        """Automatically check scores with backfill (called by timer)."""
         if not self.auto_poll_var.get():
             return
         
-        self.log(f"\n[Auto-poll] Checking scores at {datetime.now().strftime('%H:%M:%S')}")
+        self.log(f"\n[Auto-poll] Backfill grading at {datetime.now().strftime('%H:%M:%S')}")
         
         def _auto_check():
             try:
-                from datetime import timezone, timedelta
-                
-                now_utc = datetime.now(timezone.utc)
-                et_offset = timedelta(hours=-5)
-                now_et = now_utc + et_offset
-                today = now_et.strftime("%Y-%m-%d")
-                
-                games_updated, picks_graded, picks_pending = grade_picks_for_date(today)
+                games_updated, picks_graded, picks_pending = grade_all_pending()
                 
                 self.log(f"  Graded: {picks_graded}, Pending: {picks_pending}")
                 
@@ -1967,34 +2237,42 @@ class NBAPredictor(tk.Tk):
         thread.start()
     
     def check_scores(self):
-        """Check scores for today's games and grade picks."""
+        """Check scores and backfill-grade picks across the last 7 days."""
         self.check_scores_button.config(state=tk.DISABLED)
-        self.status_var.set("Checking scores...")
+        self.status_var.set("Checking scores (backfill)...")
         
         def _check():
             try:
-                from datetime import datetime, timezone, timedelta
+                self.log(f"\nBackfill grading (last 7 days)...")
                 
-                # Get today's date in ET
-                now_utc = datetime.now(timezone.utc)
-                et_offset = timedelta(hours=-5)
-                now_et = now_utc + et_offset
-                today = now_et.strftime("%Y-%m-%d")
-                
-                self.log(f"\nChecking scores for {today}...")
-                
-                # Fetch scores and grade picks
-                games_updated, picks_graded, picks_pending = grade_picks_for_date(today)
+                # Grade ALL pending picks across the backfill window
+                games_updated, picks_graded, picks_pending = grade_all_pending()
                 
                 self.log(f"  Games updated: {games_updated}")
                 self.log(f"  Picks graded: {picks_graded}")
-                self.log(f"  Picks pending: {picks_pending}")
+                self.log(f"  Picks still pending: {picks_pending}")
+                
+                # Refresh calibration if we graded new games
+                if picks_graded > 0:
+                    try:
+                        from analysis.calibration import refresh_calibration
+                        cal_info = refresh_calibration(force=True)
+                        if not cal_info.get("skipped"):
+                            self.log(f"  Calibration updated: {cal_info.get('sample_size', 0)} samples, "
+                                     f"Brier={cal_info.get('overall_brier')}")
+                            self.after(0, self.refresh_calibration_tab)
+                    except Exception as ce:
+                        self.log(f"  Calibration refresh skipped: {ce}")
                 
                 # Refresh stats display
                 self.after(0, self.refresh_stats_from_db)
-                self.after(0, lambda: self.status_var.set(f"Scores checked - {picks_graded} graded"))
+                self.after(0, lambda: self.status_var.set(
+                    f"Scores checked — {picks_graded} graded, {picks_pending} pending"
+                ))
                 
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.log(f"Error checking scores: {e}")
                 self.after(0, lambda: self.status_var.set(f"Error: {e}"))
             finally:
@@ -2213,6 +2491,51 @@ class NBAPredictor(tk.Tk):
             
             self.injuries = injuries
             
+            # Compute roster instability
+            self.log("\n  Computing roster instability...")
+            from services.instability import compute_instability_map, instability_bucket
+            
+            # Build per-team injury lists for signature building
+            injuries_by_team_for_sig = {}
+            for inj in injuries:
+                t = getattr(inj, 'team', '')
+                if t:
+                    injuries_by_team_for_sig.setdefault(t, []).append(inj)
+            
+            instability_map = compute_instability_map(
+                player_stats_by_team=player_stats,
+                injuries_by_team=injuries_by_team_for_sig,
+            )
+            
+            # Stamp instability onto TeamStrength objects
+            for abbrev, ts in team_strength.items():
+                ts.instability = instability_map.get(abbrev, 0.0)
+            
+            unstable = [(t, v) for t, v in instability_map.items() if v >= 0.10]
+            if unstable:
+                for t, v in sorted(unstable, key=lambda x: -x[1]):
+                    self.log(f"    {t}: {v:.2f} ({instability_bucket(v)})")
+            else:
+                self.log("  All teams stable (instability < 0.10)")
+            
+            # Compute schedule stress per game
+            self.log("\n  Computing schedule stress...")
+            from services.schedule_stress import compute_game_stress
+            from datetime import datetime as _dt
+            today_str = _dt.now().strftime("%Y-%m-%d")
+            stress_cache = {}  # (home, away) -> {team: TeamStressContext}
+            for game in games:
+                try:
+                    stress_ctx = compute_game_stress(
+                        game.home_team, game.away_team, today_str, season=season, timeout=30
+                    )
+                    stress_cache[(game.home_team, game.away_team)] = stress_ctx
+                    for t, ctx in stress_ctx.items():
+                        if ctx.is_b2b or ctx.games_last_4 >= 3:
+                            self.log(f"    {t}: stress={ctx.normalized:.2f} (B2B={ctx.is_b2b}, G4={ctx.games_last_4}, travel={ctx.travel_km:.0f}km)")
+                except Exception as e:
+                    print(f"  Schedule stress failed for {game.away_team}@{game.home_team}: {e}")
+            
             # Generate predictions
             self.log("\n[7/7] Generating predictions...")
             scores = []
@@ -2257,6 +2580,15 @@ class NBAPredictor(tk.Tk):
                 home_injuries = [inj for inj in injuries if getattr(inj, 'team', '').upper() == game.home_team.upper()]
                 away_injuries = [inj for inj in injuries if getattr(inj, 'team', '').upper() == game.away_team.upper()]
                 
+                # Get schedule stress for this game
+                game_stress = stress_cache.get((game.home_team, game.away_team), {})
+                h_stress = game_stress.get(game.home_team)
+                a_stress = game_stress.get(game.away_team)
+                h_stress_norm = h_stress.normalized if h_stress else 0.0
+                a_stress_norm = a_stress.normalized if a_stress else 0.0
+                h_stress_str = f"B2B={h_stress.is_b2b},G4={h_stress.games_last_4},T={h_stress.travel_km:.0f}km" if h_stress else ""
+                a_stress_str = f"B2B={a_stress.is_b2b},G4={a_stress.games_last_4},T={a_stress.travel_km:.0f}km" if a_stress else ""
+                
                 score = score_game_v3(
                     home_team=game.home_team,
                     away_team=game.away_team,
@@ -2270,6 +2602,12 @@ class NBAPredictor(tk.Tk):
                     away_players=away_players,
                     home_injuries=home_injuries,
                     away_injuries=away_injuries,
+                    instability_home=instability_map.get(game.home_team, 0.0),
+                    instability_away=instability_map.get(game.away_team, 0.0),
+                    home_stress_norm=h_stress_norm,
+                    away_stress_norm=a_stress_norm,
+                    home_stress_inputs=h_stress_str,
+                    away_stress_inputs=a_stress_str,
                 )
                 
                 score.game_id = game.game_id
@@ -2366,6 +2704,31 @@ class NBAPredictor(tk.Tk):
                 self.log(f"  Excel backup skipped: {e}")
                 # Don't fail the whole operation if Excel is locked
             
+            # Apply calibration (if mapping available)
+            try:
+                from analysis.calibration import (
+                    get_active_mapping_fn, apply_calibration,
+                    compute_calibrated_bucket,
+                )
+                from storage.db import update_calibrated_confidence
+                cal_fn, is_cal = get_active_mapping_fn()
+                if is_cal and cal_fn:
+                    cal_count = 0
+                    for score in self.scores:
+                        game_id = getattr(score, 'game_id', '')
+                        if not game_id:
+                            continue
+                        conf_raw = score.confidence_pct_value
+                        conf_cal = apply_calibration(conf_raw, cal_fn)
+                        bucket_cal = compute_calibrated_bucket(conf_cal)
+                        update_calibrated_confidence(run_date, game_id, conf_cal, bucket_cal)
+                        cal_count += 1
+                    self.log(f"  Applied calibration to {cal_count} picks")
+                else:
+                    self.log("  Calibration not available (need >= 200 graded games)")
+            except Exception as e:
+                self.log(f"  Calibration application skipped: {e}")
+            
             # Update UI
             self.after(0, self.update_predictions_display)
             self.after(0, self.update_injuries_display)
@@ -2429,6 +2792,9 @@ class NBAPredictor(tk.Tk):
                 f"{score.confidence_pct_value:.1f}%",
                 conf_bucket,
                 locked_display,
+                getattr(score, 'spread_display_fair', ''),
+                getattr(score, 'spread_display_min_ev', ''),
+                f"{getattr(score, 'sigma_margin', 12.0):.1f}",
                 pred_score,
                 score.display_total,
                 score.display_total_range,
@@ -2491,6 +2857,61 @@ class NBAPredictor(tk.Tk):
             self.on_game_selected(None)
             self.notebook.select(self.factors_frame)
     
+    def _check_ev(self):
+        """Check EV for the selected game at the entered sportsbook spread."""
+        try:
+            spread_str = self.ev_spread_var.get().strip()
+            spread_home = float(spread_str)
+        except ValueError:
+            self.ev_result_var.set("Invalid spread — enter a number like -5.5")
+            return
+        
+        # Find selected game
+        selection = self.pred_tree.selection()
+        if not selection:
+            self.ev_result_var.set("Select a game first")
+            return
+        
+        item = self.pred_tree.item(selection[0])
+        matchup = item['values'][0]
+        
+        # Find matching score
+        score = None
+        for s in self.scores:
+            if f"{s.away_team} @ {s.home_team}" == matchup:
+                score = s
+                break
+        
+        if not score:
+            self.ev_result_var.set("Game not found")
+            return
+        
+        from model.spread_pricing import cover_prob_home, cover_prob_away, BREAKEVEN_PCT_MINUS_110
+        
+        mu = score.projected_margin_home
+        sigma = getattr(score, 'sigma_margin', 12.0)
+        pick_is_home = (score.predicted_winner == score.home_team)
+        
+        p_home = cover_prob_home(mu, sigma, spread_home)
+        p_away = cover_prob_away(mu, sigma, spread_home)
+        
+        if pick_is_home:
+            p_pick = p_home
+            side_label = f"{score.predicted_winner} {spread_home:+.1f}"
+        else:
+            p_pick = p_away
+            away_line = -spread_home
+            side_label = f"{score.predicted_winner} {away_line:+.1f}"
+        
+        ev_ok = p_pick >= BREAKEVEN_PCT_MINUS_110
+        ev_label = "+EV" if ev_ok else "-EV"
+        ev_color = "green" if ev_ok else "red"
+        
+        self.ev_result_var.set(
+            f"{side_label}  |  Cover: {p_pick:.1%}  |  "
+            f"Break-even: {BREAKEVEN_PCT_MINUS_110:.1%}  |  {ev_label}"
+        )
+    
     def on_game_selected(self, event):
         """Handle game selection for factor breakdown."""
         # Clear existing
@@ -2531,6 +2952,24 @@ class NBAPredictor(tk.Tk):
                 self.factor_ppp_var.set(
                     f"{score.away_team} {score.ppp_away:.3f} / "
                     f"{score.home_team} {score.ppp_home:.3f}"
+                )
+                
+                # Update instability / recency display
+                home_ib = getattr(score, 'instability_bucket_home', 'NONE')
+                away_ib = getattr(score, 'instability_bucket_away', 'NONE')
+                self.factor_instab_var.set(
+                    f"{score.home_team} {home_ib}  /  {score.away_team} {away_ib}"
+                )
+                rw_home = getattr(score, 'recency_weight_home', 0.20)
+                rw_away = getattr(score, 'recency_weight_away', 0.20)
+                # Check if recent metrics were actually available
+                try:
+                    from ingest.team_stats import recent_metrics_available
+                    recency_status = "" if recent_metrics_available() else " [season-only]"
+                except Exception:
+                    recency_status = ""
+                self.factor_recency_var.set(
+                    f"{score.home_team} {rw_home:.0%}  /  {score.away_team} {rw_away:.0%}{recency_status}"
                 )
                 
                 # Display factors
