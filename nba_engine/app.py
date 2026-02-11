@@ -618,6 +618,7 @@ class NBAPredictor(tk.Tk):
         
         columns = (
             'matchup', 'pick', 'side', 'conf_pct', 'bucket', 'locked',
+            'fair_spread', 'min_ev', 'sigma',
             'pred_score', 'total', 'total_range', 'edge', 'margin'
         )
         
@@ -635,12 +636,15 @@ class NBAPredictor(tk.Tk):
             ('side', 'Side', 55),
             ('conf_pct', 'Conf %', 65),
             ('bucket', 'Bucket', 65),
-            ('locked', 'Locked', 55),
-            ('pred_score', 'Pred Score', 95),
+            ('locked', 'Locked', 50),
+            ('fair_spread', 'Fair Line', 95),
+            ('min_ev', 'Min +EV (-110)', 115),
+            ('sigma', 'σ', 40),
+            ('pred_score', 'Pred Score', 90),
             ('total', 'Total', 50),
-            ('total_range', 'Range', 75),
-            ('edge', 'Edge', 55),
-            ('margin', 'Margin', 60),
+            ('total_range', 'Range', 70),
+            ('edge', 'Edge', 50),
+            ('margin', 'Margin', 55),
         ]
         
         for col_id, heading, width in col_configs:
@@ -662,6 +666,30 @@ class NBAPredictor(tk.Tk):
         self.pred_tree.tag_configure('medium', background='#fff3cd')
         self.pred_tree.tag_configure('low', background='#f8d7da')
         self.pred_tree.tag_configure('locked', foreground='#666666')
+        
+        # ── EV Checker panel (below the predictions tree) ─────────
+        ev_frame = tk.Frame(self.predictions_frame, bg=COLORS['card_bg'])
+        ev_frame.pack(fill=tk.X, padx=5, pady=(2, 5))
+        
+        tk.Label(ev_frame, text="EV Check:", font=('Segoe UI', 9, 'bold'),
+                bg=COLORS['card_bg'], fg=COLORS['text']).pack(side=tk.LEFT, padx=(10, 5))
+        
+        tk.Label(ev_frame, text="Book spread (HOME line):",
+                font=('Segoe UI', 9), bg=COLORS['card_bg'],
+                fg=COLORS['text_muted']).pack(side=tk.LEFT)
+        
+        self.ev_spread_var = tk.StringVar(value="-5.5")
+        ev_entry = ttk.Entry(ev_frame, textvariable=self.ev_spread_var, width=7,
+                            font=('Segoe UI', 9))
+        ev_entry.pack(side=tk.LEFT, padx=3)
+        
+        ttk.Button(ev_frame, text="Check", command=self._check_ev,
+                  style='Secondary.TButton').pack(side=tk.LEFT, padx=3)
+        
+        self.ev_result_var = tk.StringVar(value="Select a game, enter spread, press Check")
+        tk.Label(ev_frame, textvariable=self.ev_result_var,
+                font=('Segoe UI', 9), bg=COLORS['card_bg'],
+                fg=COLORS['text']).pack(side=tk.LEFT, padx=(10, 0))
     
     def create_factors_view(self):
         """Create the factor breakdown view with confidence summary."""
@@ -2764,6 +2792,9 @@ class NBAPredictor(tk.Tk):
                 f"{score.confidence_pct_value:.1f}%",
                 conf_bucket,
                 locked_display,
+                getattr(score, 'spread_display_fair', ''),
+                getattr(score, 'spread_display_min_ev', ''),
+                f"{getattr(score, 'sigma_margin', 12.0):.1f}",
                 pred_score,
                 score.display_total,
                 score.display_total_range,
@@ -2825,6 +2856,61 @@ class NBAPredictor(tk.Tk):
             self.game_selector.current(games.index(matchup))
             self.on_game_selected(None)
             self.notebook.select(self.factors_frame)
+    
+    def _check_ev(self):
+        """Check EV for the selected game at the entered sportsbook spread."""
+        try:
+            spread_str = self.ev_spread_var.get().strip()
+            spread_home = float(spread_str)
+        except ValueError:
+            self.ev_result_var.set("Invalid spread — enter a number like -5.5")
+            return
+        
+        # Find selected game
+        selection = self.pred_tree.selection()
+        if not selection:
+            self.ev_result_var.set("Select a game first")
+            return
+        
+        item = self.pred_tree.item(selection[0])
+        matchup = item['values'][0]
+        
+        # Find matching score
+        score = None
+        for s in self.scores:
+            if f"{s.away_team} @ {s.home_team}" == matchup:
+                score = s
+                break
+        
+        if not score:
+            self.ev_result_var.set("Game not found")
+            return
+        
+        from model.spread_pricing import cover_prob_home, cover_prob_away, BREAKEVEN_PCT_MINUS_110
+        
+        mu = score.projected_margin_home
+        sigma = getattr(score, 'sigma_margin', 12.0)
+        pick_is_home = (score.predicted_winner == score.home_team)
+        
+        p_home = cover_prob_home(mu, sigma, spread_home)
+        p_away = cover_prob_away(mu, sigma, spread_home)
+        
+        if pick_is_home:
+            p_pick = p_home
+            side_label = f"{score.predicted_winner} {spread_home:+.1f}"
+        else:
+            p_pick = p_away
+            away_line = -spread_home
+            side_label = f"{score.predicted_winner} {away_line:+.1f}"
+        
+        ev_ok = p_pick >= BREAKEVEN_PCT_MINUS_110
+        ev_label = "+EV" if ev_ok else "-EV"
+        ev_color = "green" if ev_ok else "red"
+        
+        self.ev_result_var.set(
+            f"{side_label}  |  Cover: {p_pick:.1%}  |  "
+            f"Break-even: {BREAKEVEN_PCT_MINUS_110:.1%}  |  {ev_label}"
+        )
     
     def on_game_selected(self, event):
         """Handle game selection for factor breakdown."""

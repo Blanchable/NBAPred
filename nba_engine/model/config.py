@@ -45,3 +45,27 @@ INSTABILITY_NETRATING_MULT_HIGH  = 0.90
 # Maximum points to subtract from the favored side edge score for
 # bucket / confidence purposes only (does NOT change pick direction).
 INSTABILITY_SCORE_PENALTY_MAX = 2.5
+
+
+# ============================================================================
+# SPREAD PRICING
+# ============================================================================
+
+# Breakeven cover probability at standard -110 juice
+BREAKEVEN_PCT_MINUS_110 = 110.0 / 210.0           # 0.52381
+
+# Φ⁻¹(0.52381) — z-score at the breakeven probability
+Z_BREAKEVEN_MINUS_110 = 0.059717
+
+
+# ============================================================================
+# MARGIN SIGMA (volatility estimation)
+# ============================================================================
+
+SIGMA_BASE = 12.0          # league-average margin std dev
+SIGMA_MIN  = 9.0           # floor
+SIGMA_MAX  = 16.0          # ceiling
+
+# Once we have enough graded samples, blend empirical sigma in
+SIGMA_EMPIRICAL_BLEND = 0.70
+SIGMA_MIN_SAMPLES     = 200

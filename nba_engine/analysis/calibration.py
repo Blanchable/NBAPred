@@ -65,6 +65,7 @@ def load_graded_games(since_days: int = DEFAULT_LOOKBACK_DAYS) -> List[Dict[str,
     cursor.execute("""
         SELECT dp.slate_date, dp.game_id, dp.pick_side,
                dp.conf_pct, dp.bucket, dp.result,
+               dp.internal_margin,
                g.away_team, g.home_team, g.away_score, g.home_score
         FROM daily_picks dp
         JOIN games g ON dp.game_id = g.game_id
@@ -353,6 +354,51 @@ def compute_calibrated_bucket(conf_pct_cal: float) -> str:
 
 
 # ============================================================================
+# MARGIN ERROR STATISTICS (for sigma_model empirical blend)
+# ============================================================================
+
+def compute_margin_error_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute mean and std of (actual_margin − predicted_margin) from
+    graded picks that have both actual scores and internal_margin stored.
+
+    Returns:
+        Dict with margin_error_mean, margin_error_std, margin_error_n.
+    """
+    import math
+
+    errors = []
+    for row in rows:
+        pred_margin = row.get("internal_margin")
+        home_score = row.get("home_score")
+        away_score = row.get("away_score")
+        if pred_margin is None or home_score is None or away_score is None:
+            continue
+        try:
+            actual_margin = float(home_score) - float(away_score)
+            errors.append(actual_margin - float(pred_margin))
+        except (ValueError, TypeError):
+            continue
+
+    if not errors:
+        return {"margin_error_mean": None, "margin_error_std": None, "margin_error_n": 0}
+
+    n = len(errors)
+    mean_err = sum(errors) / n
+    if n >= 2:
+        var = sum((e - mean_err) ** 2 for e in errors) / (n - 1)
+        std_err = math.sqrt(var)
+    else:
+        std_err = None
+
+    return {
+        "margin_error_mean": round(mean_err, 2),
+        "margin_error_std": round(std_err, 2) if std_err is not None else None,
+        "margin_error_n": n,
+    }
+
+
+# ============================================================================
 # 3) PERSISTENCE
 # ============================================================================
 
@@ -360,6 +406,7 @@ def save_calibration(
     bin_stats: Dict[str, Any],
     mapping_meta: Dict[str, Any],
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    margin_stats: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Save calibration artefact to JSON."""
     _CALIBRATION_DIR.mkdir(parents=True, exist_ok=True)
@@ -376,6 +423,12 @@ def save_calibration(
         "overall_win_rate": bin_stats.get("overall_win_rate"),
         "avg_abs_error": bin_stats.get("avg_abs_error"),
     }
+
+    # Margin error stats for sigma_model
+    if margin_stats:
+        artifact["margin_error_mean"] = margin_stats.get("margin_error_mean")
+        artifact["margin_error_std"] = margin_stats.get("margin_error_std")
+        artifact["margin_error_n"] = margin_stats.get("margin_error_n", 0)
 
     with open(CALIBRATION_FILE, "w") as f:
         json.dump(artifact, f, indent=2)
@@ -479,7 +532,9 @@ def refresh_calibration(
 
     mapping_fn, mapping_meta = fit_calibration_mapping(rows)
 
-    save_calibration(bin_stats, mapping_meta, lookback_days)
+    margin_stats = compute_margin_error_stats(rows)
+
+    save_calibration(bin_stats, mapping_meta, lookback_days, margin_stats=margin_stats)
 
     sample_size = mapping_meta.get("sample_size", len(rows))
     method = mapping_meta.get("method", "none")

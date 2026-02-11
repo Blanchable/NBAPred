@@ -172,6 +172,14 @@ class GameScore:
     recency_weight_home: float = 0.0
     recency_weight_away: float = 0.0
     
+    # Spread pricing fields
+    fair_spread_home: float = 0.0        # fair HOME line (e.g. -5.5)
+    sigma_margin: float = 12.0           # margin volatility
+    min_ev_home_bet: float = 0.0         # threshold HOME line for +EV home bet
+    min_ev_away_bet: float = 0.0         # threshold HOME line for +EV away bet
+    spread_display_fair: str = ""        # formatted from pick perspective
+    spread_display_min_ev: str = ""      # formatted from pick perspective
+    
     # Totals prediction fields
     expected_possessions: float = 0.0
     ppp_home: float = 0.0
@@ -1517,6 +1525,35 @@ def score_game_v3(
     if DEBUG_FACTORS and totals.fallbacks_used:
         print(f"  [TOTALS_FALLBACKS] {', '.join(totals.fallbacks_used)}")
     
+    # ── Spread pricing ────────────────────────────────────────────
+    from .sigma_model import compute_sigma, SigmaContext
+    from .spread_pricing import (
+        fair_spread_home as _fair_spread_home,
+        min_ev_spread_for_home_bet,
+        min_ev_spread_for_away_bet,
+        format_spread_pick_perspective,
+    )
+
+    sigma_ctx = SigmaContext(
+        exp_poss=totals.expected_possessions,
+        home_fg3a_rate=home_fg3a_rate,
+        away_fg3a_rate=away_fg3a_rate,
+        instability_home=instability_home,
+        instability_away=instability_away,
+        questionable_count=0,  # could be enriched later
+        tier1_creator_out=home_eff_adj.has_t1_creator_out or away_eff_adj.has_t1_creator_out,
+        variance_score=totals.variance_score,
+    )
+    sigma = compute_sigma(sigma_ctx)
+
+    _fair_h = _fair_spread_home(projected_margin)
+    _min_ev_h = min_ev_spread_for_home_bet(projected_margin, sigma)
+    _min_ev_a = min_ev_spread_for_away_bet(projected_margin, sigma)
+
+    spread_info = format_spread_pick_perspective(
+        projected_margin, sigma, predicted_winner, home_team
+    )
+
     return GameScore(
         away_team=away_team,
         home_team=home_team,
@@ -1536,6 +1573,13 @@ def score_game_v3(
         instability_bucket_away=instability_bucket(instability_away),
         recency_weight_home=round(w_recent_home, 2),
         recency_weight_away=round(w_recent_away, 2),
+        # Spread pricing
+        fair_spread_home=round(_fair_h, 1),
+        sigma_margin=round(sigma, 1),
+        min_ev_home_bet=round(_min_ev_h, 1),
+        min_ev_away_bet=round(_min_ev_a, 1),
+        spread_display_fair=spread_info["fair_line"],
+        spread_display_min_ev=spread_info["min_ev_line"],
         # Totals prediction fields
         expected_possessions=round(totals.expected_possessions, 1),
         ppp_home=round(totals.ppp_home, 3),
